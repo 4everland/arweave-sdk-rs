@@ -1,7 +1,5 @@
 use std::str::FromStr;
-
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-
 use base64::{Engine as _, engine::general_purpose};
 
 use crate::error::Error;
@@ -26,8 +24,6 @@ impl TryFrom<String>for Base64 {
         Ok(Self(result))
     }
 }
-
-
 
 impl From<&[u8]> for Base64 {
     fn from(u: &[u8]) -> Self {

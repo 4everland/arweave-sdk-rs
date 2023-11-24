@@ -20,3 +20,5 @@ infer = "0.15.0"
 serde-aux = "4.2.0"
 boring = "4.1.0"
 jsonwebkey = { version = "0.3.5",  features = [ "pkcs-convert" ]}
+bytes = "1.5.0"
+async-trait = "0.1.74"

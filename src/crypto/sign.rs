@@ -52,7 +52,7 @@ impl JwkSigner {
         let mut signer = Signer::new(MessageDigest::sha256(), &self.keypair)
             .map_err(|err|Error::SigningError(err.to_string()))?;
         signer.set_rsa_padding(Padding::PKCS1_PSS)
-            .map_err(|e| Error::SigningError(e.to_string()))?;;
+            .map_err(|e| Error::SigningError(e.to_string()))?;
         signer.update(message)
             .map_err(|e| Error::SigningError(e.to_string()))?;
         let signature = signer.sign_to_vec()
@@ -62,25 +62,25 @@ impl JwkSigner {
     }
 
     pub fn verify(&self,  message: &[u8], signature: &[u8]) -> Result<(), Error> {
-        let mut verify = Verifier::new(MessageDigest::sha256(), &self.keypair).map_err(|err| Error::InvalidSignature).unwrap();
-        verify.set_rsa_padding(Padding::PKCS1_PSS).map_err(|err| Error::InvalidSignature).unwrap();
-        verify.update(message).map_err(|err| Error::InvalidSignature).unwrap();
-        verify.verify(signature).map_err(|err| Error::InvalidSignature).map(|_| ())
+        let mut verify = Verifier::new(MessageDigest::sha256(), &self.keypair).map_err(|_| Error::InvalidSignature).unwrap();
+        verify.set_rsa_padding(Padding::PKCS1_PSS).map_err(|_| Error::InvalidSignature).unwrap();
+        verify.update(message).map_err(|_| Error::InvalidSignature).unwrap();
+        verify.verify(signature).map_err(|_| Error::InvalidSignature).map(|_| ())
     }
 }
 
 pub fn verify_with_pub_key_n(n: &[u8], message: &[u8], signature: &[u8]) -> Result<(), Error> {
 
-    let n = BigNum::from_slice(n).map_err(|err| Error::InvalidSignature).unwrap();
-    let e = BigNum::from_slice(&Base64::from_str("AQAB").unwrap().0).map_err(|err| Error::InvalidSignature).unwrap();
+    let n = BigNum::from_slice(n).map_err(|_| Error::InvalidSignature).unwrap();
+    let e = BigNum::from_slice(&Base64::from_str("AQAB").unwrap().0).map_err(|_| Error::InvalidSignature).unwrap();
     let rsa_pub_key = Rsa::from_public_components(n,e)
-        .map_err(|err| Error::InvalidSignature).unwrap();
+        .map_err(|_| Error::InvalidSignature).unwrap();
 
-    let pkey = PKey::from_rsa(rsa_pub_key).map_err(|err| Error::InvalidSignature).unwrap();
-    let mut verify = Verifier::new(MessageDigest::sha256(), &pkey).map_err(|err| Error::InvalidSignature).unwrap();
-    verify.set_rsa_padding(Padding::PKCS1_PSS).map_err(|err| Error::InvalidSignature).unwrap();
-    verify.update(message).map_err(|err| Error::InvalidSignature).unwrap();
-    verify.verify(signature).map_err(|err| Error::InvalidSignature).map(|_| ())
+    let pkey = PKey::from_rsa(rsa_pub_key).map_err(|_| Error::InvalidSignature).unwrap();
+    let mut verify = Verifier::new(MessageDigest::sha256(), &pkey).map_err(|_| Error::InvalidSignature).unwrap();
+    verify.set_rsa_padding(Padding::PKCS1_PSS).map_err(|_| Error::InvalidSignature).unwrap();
+    verify.update(message).map_err(|_| Error::InvalidSignature).unwrap();
+    verify.verify(signature).map_err(|_| Error::InvalidSignature).map(|_| ())
 
 
 }
