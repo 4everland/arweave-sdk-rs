@@ -84,6 +84,9 @@ pub enum Error {
 
     #[error("SerdeJsonError")]
     SerdeJsonError(serde_json::Error),
+
+    #[error("Number {} is too large for an array of {} bytes")]
+    NumberTooLargeError(usize, u64),
 }
 
 impl From<std::io::Error> for Error {

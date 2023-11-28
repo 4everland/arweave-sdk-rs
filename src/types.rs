@@ -90,3 +90,9 @@ pub struct Chunk {
     pub offset: usize,
     pub chunk: Base64,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub struct BundleTag {
+    pub name: String,
+    pub value: String,
+}

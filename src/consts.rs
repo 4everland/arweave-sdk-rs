@@ -26,3 +26,32 @@ pub const V3_BLOCK_HEIGHT: u32 = 422250;
 
 /// Winstons are a sub unit of the native Arweave network token, AR. There are 10<sup>12</sup> Winstons per AR.
 pub const WINSTONS_PER_AR: u64 = 1_000_000_000_000;
+
+pub struct SigMeta {
+    pub sig_length: usize,
+    pub pub_length: usize,
+}
+
+const ARWEAVE_SIGN_TYPE: i32 = 1;
+const ED25519_SIGN_TYPE: i32 = 2;
+const ETHEREUM_SIGN_TYPE: i32 = 3;
+const SOLANA_SIGN_TYPE: i32 = 4;
+
+pub const SIG_CONFIG_MAP: [(i32, SigMeta); 4] = [
+    (ARWEAVE_SIGN_TYPE, SigMeta {
+        sig_length: 512,
+        pub_length: 512,
+    }),
+    (ED25519_SIGN_TYPE, SigMeta {
+        sig_length: 64,
+        pub_length: 32,
+    }),
+    (ETHEREUM_SIGN_TYPE, SigMeta {
+        sig_length: 65,
+        pub_length: 65,
+    }),
+    (SOLANA_SIGN_TYPE, SigMeta {
+        sig_length: 64,
+        pub_length: 32,
+    }),
+];
