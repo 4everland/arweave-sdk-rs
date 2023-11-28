@@ -5,23 +5,23 @@ use crate::{
     crypto::{
         base64::Base64,
         hash::{DeepHashItem, ToItems},
-        merkle::{generate_data_root, generate_leaves, Node, Proof, resolve_proofs},
+        merkle::{generate_data_root,  generate_reader_leaves, Node, Proof, resolve_proofs},
         Provider,
         hash::{deep_hash, Hasher},
         sign::verify_with_pub_key_n,
+        reader::{ TransactionReader},
     },
     currency::Currency,
-    transaction::tags::{FromUtf8Strs, Tag},
+    transaction::tags::{Tag},
     types::{
         Chunk,
         Transaction as JsonTransaction
     },
-
     error::Error,
 };
 
 #[derive(Deserialize, Debug, Default, PartialEq)]
-pub struct Transaction {
+pub struct Transaction<T: TransactionReader + Default + Sync> {
     /* Fields required for signing */
     pub format: u8,
     pub id: Base64,
@@ -30,18 +30,21 @@ pub struct Transaction {
     pub tags: Vec<Tag<Base64>>,
     pub target: Base64,
     pub quantity: Currency,
-    pub data_root: Base64,
     pub data: Base64,
+    pub data_root: Base64,
     pub data_size: u64,
     pub reward: u64,
     pub signature: Base64,
+
+    #[serde(skip)]
+    pub data_reader: T,
     #[serde(skip)]
     pub chunks: Vec<Node>,
     #[serde(skip)]
     pub proofs: Vec<Proof>,
 }
 
-impl<'a> ToItems<'a, Transaction> for Transaction {
+impl<'a, T: TransactionReader + Default + Sync>  ToItems<'a, Transaction<T>> for Transaction<T> {
     fn to_deep_hash_item(&'a self) -> Result<DeepHashItem, Error> {
         match &self.format {
             1 => {
@@ -86,13 +89,12 @@ impl<'a> ToItems<'a, Transaction> for Transaction {
         }
     }
 }
-
-impl Transaction {
+impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub async fn new(
         crypto: &Provider,
         target: Base64,
-        data: Vec<u8>,
+        data: T,
         quantity: u128,
         fee: u64,
         last_tx: Base64,
@@ -102,7 +104,7 @@ impl Transaction {
             return Err(Error::InvalidValueForTx);
         }
 
-        let mut transaction = Transaction::generate_merkle(data).unwrap();
+        let mut transaction = Transaction::generate_merkle(data).await.unwrap();
         transaction.owner = crypto.keypair_modulus();
 
         let mut tags = vec![];
@@ -116,23 +118,29 @@ impl Transaction {
         transaction.quantity = Currency::from(quantity);
         transaction.target = target;
 
+        let deep_hash_item = transaction.to_deep_hash_item()?;
+        let signature_data = crypto.deep_hash(deep_hash_item);
+        let signature = crypto.sign(&signature_data)?;
+        let id = crypto.hash_sha256(&signature.0);
+        transaction.signature = signature;
+        transaction.id = Base64(id.to_vec());
+
         Ok(transaction)
     }
 
-    fn generate_merkle(data: Vec<u8>) -> Result<Transaction, Error> {
-        if data.is_empty() {
+    async fn generate_merkle(mut data: T) -> Result<Transaction<T>, Error> {
+        if data.is_empty().await {
             let empty = Base64(vec![]);
             Ok(Transaction {
                 format: 2,
                 data_size: 0,
-                data: empty.clone(),
                 data_root: empty,
                 chunks: vec![],
                 proofs: vec![],
                 ..Default::default()
             })
         } else {
-            let mut chunks = generate_leaves(data.clone()).unwrap();
+            let mut chunks = generate_reader_leaves(&mut data).await.unwrap();
             let root = generate_data_root(chunks.clone()).unwrap();
             let data_root = Base64(root.id.into_iter().collect());
             let mut proofs = resolve_proofs(root, None).unwrap();
@@ -146,11 +154,11 @@ impl Transaction {
 
             Ok(Transaction {
                 format: 2,
-                data_size: data.len() as u64,
-                data: Base64(data),
+                data_size: data.length().await.unwrap() as u64,
                 data_root,
                 chunks,
                 proofs,
+                data_reader: data,
                 ..Default::default()
             })
         }
@@ -165,75 +173,77 @@ impl Transaction {
             tags: self.tags.clone(),
             target: self.target.clone(),
             quantity: self.quantity,
+            data: Default::default(),
             data_root: self.data_root.clone(),
-            data: Base64::default(),
             data_size: self.data_size,
             reward: self.reward,
+            data_reader: Default::default(),
             signature: self.signature.clone(),
             chunks: Vec::new(),
             proofs: Vec::new(),
         })
     }
 
-    pub fn get_chunk(&self, idx: usize) -> Result<Chunk, Error> {
+    pub async fn get_chunk(&mut self, idx: usize) -> Result<Chunk, Error> {
         Ok(Chunk {
             data_root: self.data_root.clone(),
             data_size: self.data_size,
             data_path: Base64(self.proofs[idx].proof.clone()),
             offset: self.proofs[idx].offset,
             chunk: Base64(
-                self.data.0[self.chunks[idx].min_byte_range..self.chunks[idx].max_byte_range]
-                    .to_vec(),
+                self.data_reader.chunk_read(self.chunks[idx].min_byte_range, self.chunks[idx].max_byte_range).await.unwrap().to_vec(),
             ),
         })
     }
 
-    pub fn verify(&self) -> Result<(), Error> {
+    pub fn verify(&mut self) -> Result<(), Error> {
         if self.signature.is_empty() {
             return Err(Error::UnsignedTransaction);
         }
 
+        let id = self.signature.0.as_slice().sha256();
+        if !Base64(id.to_vec()).eq(&self.id) {
+            return Err(Error::TransactionWrongId)
+        }
         let deep_hash_item = self.to_deep_hash_item()?;
         let message = deep_hash(deep_hash_item);
 
         verify_with_pub_key_n(&self.owner.0, &message, &self.signature.0).map(|_| ())
-            .map_err(|err| {
-                println!("er3 {}", err);
-                Error::InvalidSignature})
-
+            .map_err(|_| { Error::InvalidSignature })
     }
 }
 
 
 
-impl TryFrom<JsonTransaction> for Transaction {
+impl TryFrom<JsonTransaction> for Transaction<Base64> {
     type Error = Error;
-    fn try_from(json_tx: JsonTransaction) -> Result<Self, Self::Error> {
-        let tags = json_tx.tags.iter().map(Tag::from).collect();
-        Ok(Transaction {
-            quantity: Currency::from_str(&json_tx.quantity).unwrap(),
-            format: json_tx.format,
-            id: json_tx.id.try_into().map_err(Error::Base64DecodeError)?,
-            last_tx: json_tx.last_tx.try_into().map_err(Error::Base64DecodeError)?,
-            owner: json_tx.owner.try_into().map_err(Error::Base64DecodeError)?,
-            tags,
-            target: json_tx.target.try_into().map_err(Error::Base64DecodeError)?,
-            data_root: json_tx.data_root.try_into().map_err(Error::Base64DecodeError)?,
-            data: json_tx.data.try_into().map_err(Error::Base64DecodeError)?,
-            data_size: u64::from_str(&json_tx.data_size).unwrap(),
-            reward: u64::from_str(&json_tx.reward).unwrap(),
-            signature: json_tx.signature.try_into().map_err(Error::Base64DecodeError)?,
-            chunks: vec![],
-            proofs: vec![],
-        })
+    fn try_from(json_tx: JsonTransaction) -> Result< Self, Self::Error> {
+    let tags = json_tx.tags.iter().map(Tag::from).collect();
+    Ok(Transaction {
+        quantity: Currency::from_str( & json_tx.quantity).unwrap(),
+        format: json_tx.format,
+        id: json_tx.id.try_into().map_err(Error::Base64DecodeError) ?,
+        last_tx: json_tx.last_tx.try_into().map_err(Error::Base64DecodeError) ?,
+        owner: json_tx.owner.try_into().map_err(Error::Base64DecodeError) ?,
+        tags,
+        target: json_tx.target.try_into().map_err(Error::Base64DecodeError) ?,
+        data_root: json_tx.data_root.try_into().map_err(Error::Base64DecodeError) ?,
+        data: Base64::from_str(json_tx.data.as_str()).unwrap(),
+        data_reader: Base64::from_str(json_tx.data.as_str()).unwrap(),
+        data_size: u64::from_str( & json_tx.data_size).unwrap(),
+        reward: u64::from_str(& json_tx.reward).unwrap(),
+        signature: json_tx.signature.try_into().map_err(Error::Base64DecodeError) ?,
+        chunks: vec ! [],
+        proofs: vec ! [],
+    })
     }
 }
 
-impl TryFrom<&str> for Transaction {
+impl TryFrom<&str> for Transaction<Base64> {
     type Error = Error;
 
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let json_tx: JsonTransaction = serde_json::from_str(s).map_err(Error::SerdeJsonError)?;
+    fn try_from(s: &str) -> Result< Self, Self::Error> {
+        let json_tx: JsonTransaction = serde_json::from_str(s).map_err(Error::SerdeJsonError) ?;
         Transaction::try_from(json_tx)
     }
 }
@@ -255,22 +265,35 @@ mod tests {
         let mut data = String::new();
         file.read_to_string(&mut data).unwrap();
 
-        let actual_tx: Transaction = data.as_str().try_into().unwrap();
+        let actual_tx: Transaction<Base64> = data.as_str().try_into().unwrap();
         let expected_tx = Transaction {
             format: 2,
-            id: Base64::from_str("t3K1b8IhvtGWxAGsipZE5NafmEGrtj3OAcYikJ0edeU").unwrap(),
-            last_tx: Base64::from_str("ddvXNxatQmS3LeKi_x1RJn6g9G0esUaTEgT40a6f_WYyawZaSK3w8WC2czAuLgmT").unwrap(),
-            owner: Base64::from_str("pjdss8ZaDfEH6K6U7GeW2nxDqR4IP049fk1fK0lndimbMMVBdPv_hSpm8T8EtBDxrUdi1OHZfMhUixGaut-3nQ4GG9nM249oxhCtxqqNvEXrmQRGqczyLxuh-fKn9Fg--hS9UpazHpfVAFnB5aCfXoNhPuI8oByyFKMKaOVgHNqP5NBEqabiLftZD3W_lsFCPGuzr4Vp0YS7zS2hDYScC2oOMu4rGU1LcMZf39p3153Cq7bS2Xh6Y-vw5pwzFYZdjQxDn8x8BG3fJ6j8TGLXQsbKH1218_HcUJRvMwdpbUQG5nvA2GXVqLqdwp054Lzk9_B_f1lVrmOKuHjTNHq48w").unwrap(),
+            id: Base64::from_str("7DjRLlYLAQOwcblMLX5hXW8WiZdvFDmxu_fNToLjYP0").unwrap(),
+            last_tx: Base64::from_str("8iQ198CY00aVsLSONWLVVYGWl41Pwzk851hEaJmlmg88qnI7VhgPpZdGUog_KGQ3").unwrap(),
+            owner: Base64::from_str("4iZJkYeVMYweuaF_X1-59T9Uk6znM-6XIUPQ_RgjWNJ5hFtgwk-teR9WrdvK3ndMvVxDqORmjCSsEvbohSdL3XVi3Qx3RfSKdK2xjMfe5aPyjNZygk3_diEg1X01pUuv5AZZpT8ANprpB1wOquJtG1ZNVgkp_0s-JzjynKgOY90vc5MKC4jkGB9KMMmQG7FMkajlirmZPHjzhOotJVbbL9Ynd_LWtQRva4EYf59h8ddaB7Gq1U5lXcKYN9x1EokkR-uLUYlVk1AQ6WfBtRuX51OOI_rLM0tn_KCeUioVSesC8WxASreOx8V8kZIKAMoDRAJIZ64XSu8uL6kyLFfi2yaAPMIXIEF3zO-37lEsUa_Z2Mdg05AsV4CWTIvwgd9n8oGIiQXWMmvt2oG0ZLT72lLSCavVh4Uf1JXTRpnkl0RUduu5N_MZSw6qMoYSvzEmSEmpI3ag9k3Zb6WVwZWllIcHupsXR5LvpMDV-HhGXkVnDVDp3Y0MbnMacQNrdkSLSDYoz4RkuaZiIj0CR6PnHoAM-gG-WnFW6ktdjaEKiSxHg1FOJjyZ1YeyPRFWXxOPsdak1SRMsGhrd2dIx6FO3_0tdKJn7e0bSoxtbV9Ljvnflm3fnMKs2ohA8F9ugDGAbv4zoiFqApETi8HLwU47Myn149NycxMXcf0PUjWMiXM").unwrap(),
             tags: vec![
-                Tag { name: Base64(b"test".to_vec()), value: Base64(b"test".to_vec()) }
+                Tag { name: Base64(b"Bundle-Format".to_vec()), value: Base64(b"binary".to_vec()) },
+                Tag { name: Base64(b"Bundle-Version".to_vec()), value: Base64(b"2.0.0".to_vec()) },
+                Tag { name: Base64(b"Application".to_vec()), value: Base64(b"4EVERLAND".to_vec()) },
+                Tag { name: Base64(b"Website".to_vec()), value: Base64(b"4everland.org".to_vec()) },
+                Tag { name: Base64(b"App-Name".to_vec()), value: Base64(b"arseeding".to_vec()) },
+                Tag { name: Base64(b"App-Version".to_vec()), value: Base64(b"1.0.0".to_vec()) },
+                Tag { name: Base64(b"Action".to_vec()), value: Base64(b"Bundle".to_vec()) },
+                Tag { name: Base64(b"Protocol-Name".to_vec()), value: Base64(b"U".to_vec()) },
+                Tag { name: Base64(b"Action".to_vec()), value: Base64(b"Burn".to_vec()) },
+                Tag { name: Base64(b"App-Name".to_vec()), value: Base64(b"SmartWeaveAction".to_vec()) },
+                Tag { name: Base64(b"App-Version".to_vec()), value: Base64(b"0.3.0".to_vec()) },
+                Tag { name: Base64(b"Input".to_vec()), value: Base64(b"{\"function\":\"mint\"}".to_vec()) },
+                Tag { name: Base64(b"Contract".to_vec()), value: Base64(b"KTzTXT_ANmF84fWEKHzWURD1LWd9QaFR9yfYUwH2Lxw".to_vec()) },
             ],
-            target: Base64::from_str("PAgdonEn9f5xd-UbYdCX40Sj28eltQVnxz6bbUijeVY").unwrap(),
-            quantity: Currency::from(100000),
-            data_root: Base64(vec![]),
+            target: Base64(vec![]),
+            quantity: Currency::from(0),
+            data_root: Base64::from_str("UhOCNNZ6QteHG4nCDbFMDpbYWIo1FmEhU9nLw4M8KB0").unwrap(),
             data: Base64(vec![]),
-            data_size: 0,
-            reward: 600912,
-            signature: Base64::from_str("EJQN0DpfPBm1aUo1qk6dCkrY_zKHMJBQx3v36UOzmodF39RvBI2rqx_gTgLzszNkHIWnf-zwzXCz6xF5wzlrHWkosgfSwfZOhm3aVE5KLGvqVqSlMTlIzkIcR6KKFRe9m7HyOxJHvXykAD8X1X_6RExnXAZX4B9mwR10lqCG2wkRMJxchVisOZph-O5OfgteC1lb5YFx0BNAtmVgtUlY7dQdV1vVYq2_sDJPkYpHK5YIMIjoRsqdGP31gOFXTmzuIHYhRyii-clx2uxrv0pjfnv9tl9WPViHu3FGLlW9tH5z3mXdt7PQx-o8MGK_MXz10LLlqsPdos2rI3D3MgPUqQ").unwrap(),
+            data_reader: Base64(vec![]),
+            data_size: 60589,
+            reward: 212017846,
+            signature: Base64::from_str("UJvcZhVoS_vRlETe8mEL-yq_qb_76dzBVmD2-mPUPAnWyC--2U85C1gpVD3-PTYQZq-aZpMmIJp4nFAjEsxssCwcIlCboC5EEG14T520g_9blmdB0u9Jj_4AVMB858K_KRL7Dh_GRudgSDOPY_2d9KjjIJTSm_4TeJk9ZoifsOn0OAMny71mUSNWtEjcTozSlKEMn6xqlsuXGAMVswlTaqy_MWbFllUkhpQdYg7lI2MdppMt-I30cVed4opxDRMHmFhA31FjpOmqkRbB1E7h8xK_t7XEZ2lSCjVH_stlPjgmKgh83Wm87f0qgkOp_N-oZrExX7yMkjzPUguxsG06zVzvNdA3OM2sIkAJuTbCmX0BeVUliYPaEWiny_cOQYbyKCiW8Mla2_ut77b-nKvR2Llu32HCLjh8hpx7GuPKQzOmBgfBLvLApu_ob-ytOnxWBaod9iqHk_hkGFUdyg_eb7w7RumijCAa2azVvor1IUizJFZ-9Cp6GkKCdCeQsTjiaS0wpPoh4MQ18HSey8lfqio_QrH_L6ARIeWh0aOzZ_R4ciYBK0YNqawMygTnktYZo4T6rzkB6FHR5hEwcqA2LtBc5Q6ktaZi0dyiUsE_zMALyM7toUAg3njorgYCQfQqj_79oPetgMz_cBQvHkHdpSqM2EdMxONz-aIpzq5iboA").unwrap(),
             chunks: vec![],
             proofs: vec![]
         };
@@ -281,27 +304,39 @@ mod tests {
     #[test]
     pub fn should_verify_correctly() {
 
-        let tx = &Transaction {
+        let mut tx = Transaction {
             format: 2,
-            id: Base64::from_str("t3K1b8IhvtGWxAGsipZE5NafmEGrtj3OAcYikJ0edeU").unwrap(),
-            last_tx: Base64::from_str("ddvXNxatQmS3LeKi_x1RJn6g9G0esUaTEgT40a6f_WYyawZaSK3w8WC2czAuLgmT").unwrap(),
-            owner: Base64::from_str("pjdss8ZaDfEH6K6U7GeW2nxDqR4IP049fk1fK0lndimbMMVBdPv_hSpm8T8EtBDxrUdi1OHZfMhUixGaut-3nQ4GG9nM249oxhCtxqqNvEXrmQRGqczyLxuh-fKn9Fg--hS9UpazHpfVAFnB5aCfXoNhPuI8oByyFKMKaOVgHNqP5NBEqabiLftZD3W_lsFCPGuzr4Vp0YS7zS2hDYScC2oOMu4rGU1LcMZf39p3153Cq7bS2Xh6Y-vw5pwzFYZdjQxDn8x8BG3fJ6j8TGLXQsbKH1218_HcUJRvMwdpbUQG5nvA2GXVqLqdwp054Lzk9_B_f1lVrmOKuHjTNHq48w").unwrap(),
+            id: Base64::from_str("7DjRLlYLAQOwcblMLX5hXW8WiZdvFDmxu_fNToLjYP0").unwrap(),
+            last_tx: Base64::from_str("8iQ198CY00aVsLSONWLVVYGWl41Pwzk851hEaJmlmg88qnI7VhgPpZdGUog_KGQ3").unwrap(),
+            owner: Base64::from_str("4iZJkYeVMYweuaF_X1-59T9Uk6znM-6XIUPQ_RgjWNJ5hFtgwk-teR9WrdvK3ndMvVxDqORmjCSsEvbohSdL3XVi3Qx3RfSKdK2xjMfe5aPyjNZygk3_diEg1X01pUuv5AZZpT8ANprpB1wOquJtG1ZNVgkp_0s-JzjynKgOY90vc5MKC4jkGB9KMMmQG7FMkajlirmZPHjzhOotJVbbL9Ynd_LWtQRva4EYf59h8ddaB7Gq1U5lXcKYN9x1EokkR-uLUYlVk1AQ6WfBtRuX51OOI_rLM0tn_KCeUioVSesC8WxASreOx8V8kZIKAMoDRAJIZ64XSu8uL6kyLFfi2yaAPMIXIEF3zO-37lEsUa_Z2Mdg05AsV4CWTIvwgd9n8oGIiQXWMmvt2oG0ZLT72lLSCavVh4Uf1JXTRpnkl0RUduu5N_MZSw6qMoYSvzEmSEmpI3ag9k3Zb6WVwZWllIcHupsXR5LvpMDV-HhGXkVnDVDp3Y0MbnMacQNrdkSLSDYoz4RkuaZiIj0CR6PnHoAM-gG-WnFW6ktdjaEKiSxHg1FOJjyZ1YeyPRFWXxOPsdak1SRMsGhrd2dIx6FO3_0tdKJn7e0bSoxtbV9Ljvnflm3fnMKs2ohA8F9ugDGAbv4zoiFqApETi8HLwU47Myn149NycxMXcf0PUjWMiXM").unwrap(),
             tags: vec![
-                Tag { name: Base64(b"test".to_vec()), value: Base64(b"test".to_vec()) }
+                Tag { name: Base64(b"Bundle-Format".to_vec()), value: Base64(b"binary".to_vec()) },
+                Tag { name: Base64(b"Bundle-Version".to_vec()), value: Base64(b"2.0.0".to_vec()) },
+                Tag { name: Base64(b"Application".to_vec()), value: Base64(b"4EVERLAND".to_vec()) },
+                Tag { name: Base64(b"Website".to_vec()), value: Base64(b"4everland.org".to_vec()) },
+                Tag { name: Base64(b"App-Name".to_vec()), value: Base64(b"arseeding".to_vec()) },
+                Tag { name: Base64(b"App-Version".to_vec()), value: Base64(b"1.0.0".to_vec()) },
+                Tag { name: Base64(b"Action".to_vec()), value: Base64(b"Bundle".to_vec()) },
+                Tag { name: Base64(b"Protocol-Name".to_vec()), value: Base64(b"U".to_vec()) },
+                Tag { name: Base64(b"Action".to_vec()), value: Base64(b"Burn".to_vec()) },
+                Tag { name: Base64(b"App-Name".to_vec()), value: Base64(b"SmartWeaveAction".to_vec()) },
+                Tag { name: Base64(b"App-Version".to_vec()), value: Base64(b"0.3.0".to_vec()) },
+                Tag { name: Base64(b"Input".to_vec()), value: Base64(b"{\"function\":\"mint\"}".to_vec()) },
+                Tag { name: Base64(b"Contract".to_vec()), value: Base64(b"KTzTXT_ANmF84fWEKHzWURD1LWd9QaFR9yfYUwH2Lxw".to_vec()) },
             ],
-            target: Base64::from_str("PAgdonEn9f5xd-UbYdCX40Sj28eltQVnxz6bbUijeVY").unwrap(),
-            quantity: Currency::from(100000),
-            data_root: Base64(vec![]),
+            target: Base64(vec![]),
+            quantity: Currency::from(0),
+            data_root: Base64::from_str("UhOCNNZ6QteHG4nCDbFMDpbYWIo1FmEhU9nLw4M8KB0").unwrap(),
             data: Base64(vec![]),
-            data_size: 0,
-            reward: 600912,
-            signature: Base64::from_str("EJQN0DpfPBm1aUo1qk6dCkrY_zKHMJBQx3v36UOzmodF39RvBI2rqx_gTgLzszNkHIWnf-zwzXCz6xF5wzlrHWkosgfSwfZOhm3aVE5KLGvqVqSlMTlIzkIcR6KKFRe9m7HyOxJHvXykAD8X1X_6RExnXAZX4B9mwR10lqCG2wkRMJxchVisOZph-O5OfgteC1lb5YFx0BNAtmVgtUlY7dQdV1vVYq2_sDJPkYpHK5YIMIjoRsqdGP31gOFXTmzuIHYhRyii-clx2uxrv0pjfnv9tl9WPViHu3FGLlW9tH5z3mXdt7PQx-o8MGK_MXz10LLlqsPdos2rI3D3MgPUqQ").unwrap(),
+            data_reader: Base64(vec![]),
+            data_size: 60589,
+            reward: 212017846,
+            signature: Base64::from_str("UJvcZhVoS_vRlETe8mEL-yq_qb_76dzBVmD2-mPUPAnWyC--2U85C1gpVD3-PTYQZq-aZpMmIJp4nFAjEsxssCwcIlCboC5EEG14T520g_9blmdB0u9Jj_4AVMB858K_KRL7Dh_GRudgSDOPY_2d9KjjIJTSm_4TeJk9ZoifsOn0OAMny71mUSNWtEjcTozSlKEMn6xqlsuXGAMVswlTaqy_MWbFllUkhpQdYg7lI2MdppMt-I30cVed4opxDRMHmFhA31FjpOmqkRbB1E7h8xK_t7XEZ2lSCjVH_stlPjgmKgh83Wm87f0qgkOp_N-oZrExX7yMkjzPUguxsG06zVzvNdA3OM2sIkAJuTbCmX0BeVUliYPaEWiny_cOQYbyKCiW8Mla2_ut77b-nKvR2Llu32HCLjh8hpx7GuPKQzOmBgfBLvLApu_ob-ytOnxWBaod9iqHk_hkGFUdyg_eb7w7RumijCAa2azVvor1IUizJFZ-9Cp6GkKCdCeQsTjiaS0wpPoh4MQ18HSey8lfqio_QrH_L6ARIeWh0aOzZ_R4ciYBK0YNqawMygTnktYZo4T6rzkB6FHR5hEwcqA2LtBc5Q6ktaZi0dyiUsE_zMALyM7toUAg3njorgYCQfQqj_79oPetgMz_cBQvHkHdpSqM2EdMxONz-aIpzq5iboA").unwrap(),
             chunks: vec![],
             proofs: vec![]
         };
 
-        let v = tx.verify().map_err(|err| {
-            println!("err: {}", err);
+        let v = tx.verify().map_err(|_| {
             Error::InvalidSignature
         });
         assert!(v.is_ok());

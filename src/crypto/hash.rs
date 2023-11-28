@@ -107,13 +107,14 @@ pub fn deep_hash(deep_hash_item: DeepHashItem) -> [u8; 48] {
 }
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Read, str::FromStr};
+    use std::{fs::File, io::Read};
 
     use crate::{
         crypto::hash::{deep_hash, ToItems},
         error::Error,
         transaction::transaction::Transaction,
     };
+    use crate::crypto::base64::Base64;
 
     #[tokio::test]
     async fn test_deep_hash() -> Result<(), Error> {
@@ -121,14 +122,14 @@ mod tests {
         let mut data = String::new();
         file.read_to_string(&mut data).unwrap();
 
-        let tx: Transaction = data.as_str().try_into()?;
+        let tx: Transaction<Base64> = data.as_str().try_into()?;
 
         let actual_hash = deep_hash(tx.to_deep_hash_item().unwrap());
-        let correct_hash: [u8; 48] = [
-            74, 15, 74, 255, 248, 205, 47, 229, 107, 195, 69, 76, 215, 249, 34, 186, 197, 31, 178,
-            163, 72, 54, 78, 179, 19, 178, 1, 132, 183, 231, 131, 213, 146, 203, 6, 99, 106, 231,
-            215, 199, 181, 171, 52, 255, 205, 55, 203, 117,
-        ];
+
+        let correct_hash: [u8; 48] = [39, 16, 175, 205, 64, 3, 182, 248, 240, 38,
+            169, 233, 4, 140, 97, 83, 148, 224, 29, 119, 70, 146, 76, 254, 217,
+            238, 208, 164, 251, 217, 161, 48, 47, 132, 144, 116, 27, 246, 32, 205,
+            17, 227, 169, 8, 39, 205, 27, 78];
         assert_eq!(actual_hash, correct_hash);
 
         Ok(())

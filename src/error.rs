@@ -46,6 +46,9 @@ pub enum Error {
     #[error("Error getting wallet: {0}")]
     WalletError(String),
 
+    #[error("Wrong Id")]
+    TransactionWrongId,
+
     #[error("Invalid signature")]
     InvalidSignature,
 

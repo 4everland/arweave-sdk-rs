@@ -4,7 +4,7 @@ use crate::error::Error;
 
 use self::{
     base64::Base64,
-    hash::{deep_hash, Hasher, DeepHashItem},
+    hash::{deep_hash, DeepHashItem, Hasher},
     sign::JwkSigner,
 };
 
@@ -12,6 +12,7 @@ pub mod base64;
 pub mod hash;
 pub mod merkle;
 pub mod sign;
+pub mod reader;
 
 pub struct Provider {
     pub signer: Box<JwkSigner>,
@@ -56,7 +57,7 @@ impl Provider {
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::Error, crypto::sign::verify_with_pub_key_n};
+    use crate::{crypto::sign::verify_with_pub_key_n, error::Error};
 
     use super::{base64::Base64, Provider};
 
