@@ -1,11 +1,11 @@
 use std::path::PathBuf;
-
 use crate::error::Error;
 
 use self::{
     base64::Base64,
     hash::{deep_hash, DeepHashItem, Hasher},
-    sign::JwkSigner,
+    sign::ArweaveSigner,
+    sign::Signer,
 };
 
 pub mod base64;
@@ -14,61 +14,22 @@ pub mod merkle;
 pub mod sign;
 pub mod reader;
 
-pub struct Provider {
-    pub signer: Box<JwkSigner>,
-}
-
-impl Provider {
-    pub fn from_keypair_path(keypair_path: PathBuf) -> Result<Self, Error> {
-        let signer = JwkSigner::from_keypair_path(keypair_path)?;
-        Ok(Provider::new(Box::new(signer)))
-    }
-
-    pub fn new(signer: Box<JwkSigner>) -> Self {
-        Provider { signer }
-    }
-}
-
-impl Provider {
-    pub fn deep_hash(&self, deep_hash_item: DeepHashItem) -> [u8; 48] {
-        deep_hash(deep_hash_item)
-    }
-
-    pub fn sign(&self, message: &[u8]) -> Result<Base64, Error> {
-        self.signer.sign(message)
-    }
-
-    pub fn hash_sha256(&self, message: &[u8]) -> [u8; 32] {
-        message.sha256()
-    }
-
-    pub fn keypair_modulus(&self) -> Base64 {
-        self.signer.public_key()
-    }
-
-    pub fn wallet_address(&self) -> Base64 {
-        self.signer.wallet_address()
-    }
-
-    pub fn public_key(&self) -> Base64 {
-        self.signer.public_key()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{crypto::sign::verify_with_pub_key_n, error::Error};
+    use std::path::PathBuf;
+    use std::str::FromStr;
+    use crate::error::Error;
+    use crate::crypto::base64::Base64;
+    use crate::crypto::sign::{ArweaveSigner, Signer};
 
-    use super::{base64::Base64, Provider};
+    const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
 
-    impl Default for Provider {
+    impl Default for ArweaveSigner {
         fn default() -> Self {
-            Self {
-                signer: Default::default(),
-            }
+            let path = PathBuf::from_str(DEFAULT_WALLET_PATH).unwrap();
+            Self::from_keypair_path(path).expect("Could not create signer")
         }
     }
-
     #[test]
     fn test_sign_verify() -> Result<(), Error> {
         let message = Base64(
@@ -80,12 +41,12 @@ mod tests {
             .to_vec(),
         );
 
-        let provider = Provider::default();
-        let signature = provider.sign(&message.0)?;
+        let s = ArweaveSigner::default();
+        let signature = s.sign(&message.0)?;
 
-        println!("signature: {}", signature.to_string());
-        let pubk = provider.public_key();
-        assert!(verify_with_pub_key_n(&pubk.0, &message.0, &signature.0).is_ok());
+        let pubk = s.public_key().unwrap();
+
+        assert!(s.verify(&message.0, &signature));
         Ok(())
     }
 }

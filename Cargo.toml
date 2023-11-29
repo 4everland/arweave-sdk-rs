@@ -24,3 +24,11 @@ apache-avro = "0.16.0"
 lazy_static = { version = "1.4.0", features = [] }
 bytes = "1.5.0"
 async-trait = "0.1.74"
+reqwest = { version = "0.11.22", default-features = false, features = ["rustls-tls", "json"] }
+bip32 =  { version = "0.5.1", features = ["bip39", "mnemonic"] }
+ethsign = { version = "0.9.0", features = ["pure-rust"] }
+k256 = "0.13.2"
+bitcoin = "0.31.0"
+bip39 = "2.0.0"
+ethaddr = "0.2.2"
+

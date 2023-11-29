@@ -82,13 +82,22 @@ pub enum Error {
     // #[error("ReqwestError")]
     // ReqwestError(reqwest::Error),
 
+    #[error("Invalid Key")]
+    InvalidKeyError,
+
+    #[error("AddressError")]
+    AddressDecodeError,
+
+    #[error("MnemonicError")]
+    MnemonicDecodeError,
+
     #[error("DecodeError")]
     Base64DecodeError(base64::DecodeError),
 
     #[error("SerdeJsonError")]
     SerdeJsonError(serde_json::Error),
 
-    #[error("Number {} is too large for an array of {} bytes")]
+    #[error("Number {0} is too large for an array of {1} bytes")]
     NumberTooLargeError(usize, u64),
 }
 

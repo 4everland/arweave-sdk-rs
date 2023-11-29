@@ -5,3 +5,4 @@ mod consts;
 mod currency;
 mod types;
 mod bundle;
+mod client;

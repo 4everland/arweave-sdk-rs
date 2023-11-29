@@ -5,24 +5,172 @@ use jsonwebkey as jwk;
 use sha2::Digest;
 use std::{fs, path::PathBuf};
 use std::str::FromStr;
+use bip39::Language::English;
+use bitcoin::hex::DisplayHex;
 
 use super::base64::Base64;
 use boring::{
-    sign::{Signer, Verifier},
+    sign::{Signer as BoringSigner, Verifier},
     rsa::{Rsa, Padding},
     pkey::{PKey, Private},
     hash::MessageDigest,
     bn::BigNum,
 };
+use ethsign::SecretKey;
 
+pub trait Signer {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error>;
+    fn verify(&self, message: &[u8], signature: &[u8]) -> bool;
+    fn public_key(&self) -> Result<Base64, Error>;
+    fn wallet_address(&self) -> String;
+
+}
 /// Struct for for crypto methods.
-pub struct JwkSigner {
-    keypair: PKey<Private>,
+pub struct ArweaveSigner {
+    keypair: Option<PKey<Private>>,
+    n: Vec<u8>,
+
 }
 
-impl JwkSigner {
+pub struct EthSigner {
+    key: Option<ethsign::SecretKey>,
+    address: [u8; 20],
+}
+impl Signer for EthSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
+
+        match &self.key {
+            Some(key) => {
+                let sig = key.sign(message).map_err(|err|Error::SigningError("eth sign".to_string()))?;
+                let mut r = [0u8; 65];
+                r[0] = sig.v;
+                r[1..33].copy_from_slice(&sig.r);
+                r[33..65].copy_from_slice(&sig.s);
+                Ok(r.to_vec())
+            }
+            _ => {
+                Err(Error::InvalidKeyError)
+            }
+        }
+
+    }
+    fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
+        match self.verify_result(message, signature) {
+            Ok(_) => true,
+            Err(_) => false
+        }
+    }
+
+    fn public_key(&self) -> Result<Base64, Error> {
+        let key = match &self.key {
+            Some(k) => k,
+            _ => { return Err(Error::InvalidKeyError) }
+        };
+
+        Ok(Base64::from(key.public().bytes().as_slice()))
+    }
+
+    fn wallet_address(&self) -> String {
+        ethaddr::Address::from_slice(&self.address).to_lower_hex_string()
+    }
+}
+
+impl EthSigner {
+    fn from_mnemonic(mnemonic: &str, passphrase: &str) -> Result<EthSigner, Error> {
+        let seed = bip39::Mnemonic::parse_in_normalized(English, mnemonic).map_err(|_| Error::MnemonicDecodeError)?;
+        let pri_key = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Bitcoin, seed.to_seed(passphrase).as_ref()).map_err(|_| Error::MnemonicDecodeError)?;
+        let x = pri_key.private_key;
+
+        let eth_pri_key = ethsign::SecretKey::from_raw(x.secret_bytes().as_slice()).unwrap();
+        Ok(Self {
+            key: Some(eth_pri_key.clone()),
+            address: eth_pri_key.public().address().clone(),
+        })
+    }
+
+    fn from_address(addr: &str) -> Result<EthSigner, Error> {
+        let addr = ethaddr::Address::from_str_checksum(addr).map_err(|_| Error::AddressDecodeError)?;
+        Ok(Self {
+            key: None,
+            address: addr.0,
+        })
+    }
+    fn from_pubkey(key: &[u8]) -> Result<EthSigner, Error> {
+        let key = ethsign::PublicKey::from_slice(key).map_err(|_| Error::AddressDecodeError)?;
+        Ok(Self {
+            key: None,
+            address: key.address().clone(),
+        })
+    }
+    fn verify_result(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {
+        if signature.len() != 65 {
+            return Err(Error::InvalidSignature)
+        }
+        let mut r = [0u8; 32];
+        r.copy_from_slice(&signature[1..33]);
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&signature[33..65]);
+
+        let sig = ethsign::Signature{
+            v: signature[0],
+            r,
+            s,
+        };
+        let key = sig.recover(message).map_err(|_|Error::InvalidSignature)?;
+        if key.address().eq(&self.address) {
+            Ok(())
+        } else {
+            Err(Error::InvalidSignature)
+        }
+    }
+
+
+}
+
+impl Signer for ArweaveSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
+        let keypair = match &self.keypair {
+            Some(k) => k,
+            _ => {return Err(Error::InvalidKeyError)}
+        };
+        let mut signer = BoringSigner::new(MessageDigest::sha256(), keypair)
+            .map_err(|err|Error::SigningError(err.to_string()))?;
+        signer.set_rsa_padding(Padding::PKCS1_PSS)
+            .map_err(|e| Error::SigningError(e.to_string()))?;
+        signer.update(message)
+            .map_err(|e| Error::SigningError(e.to_string()))?;
+        let signature = signer.sign_to_vec()
+            .map_err(|e|Error::SigningError(e.to_string()))?;
+        Ok(signature)
+    }
+
+    fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
+        match self.verify_result(message, signature) {
+            Ok(_) => true,
+            Err(_) => false
+        }
+    }
+
+    fn public_key(&self) -> Result<Base64, Error> {
+
+        let key = match &self.keypair {
+            Some(k) => k,
+            _ => { return Ok(Base64::from(self.n.as_slice())) }
+        };
+        let key = key.rsa().map_err(|_| Error::InvalidKeyError).unwrap();
+        Ok(Base64(key.n().to_vec()))
+    }
+
+    fn wallet_address(&self) -> String {
+        let key = self.public_key().unwrap();
+        let mut context = sha2::Sha256::new();
+        context.update(&key.0[..]);
+        Base64(context.finalize().to_vec()).to_string()
+    }
+}
+impl ArweaveSigner {
     fn new(keypair: PKey<Private>) -> Self {
-        Self { keypair }
+        Self { keypair: Some(keypair.clone()), n: keypair.rsa().unwrap().n().to_vec() }
     }
 
     pub fn from_jwk(jwk: jwk::JsonWebKey) -> Result<Self, Error> {
@@ -38,50 +186,39 @@ impl JwkSigner {
         Self::from_jwk(jwk_parsed)
     }
 
-    pub fn public_key(&self) -> Base64 {
-        Base64(self.keypair.rsa().unwrap().n().to_vec())
+    pub fn from_owner(owner: Base64) -> Result<Self, Error> {
+        Ok(Self { keypair: None, n: owner.0.to_vec() })
     }
 
     pub fn wallet_address(&self) -> Base64 {
+        let key = self.public_key().unwrap();
         let mut context = sha2::Sha256::new();
-        context.update(&self.public_key().0[..]);
+        context.update(&key.0[..]);
         Base64(context.finalize().to_vec())
     }
 
-    pub fn sign(&self, message: &[u8]) -> Result<Base64, Error> {
-        let mut signer = Signer::new(MessageDigest::sha256(), &self.keypair)
-            .map_err(|err|Error::SigningError(err.to_string()))?;
-        signer.set_rsa_padding(Padding::PKCS1_PSS)
-            .map_err(|e| Error::SigningError(e.to_string()))?;
-        signer.update(message)
-            .map_err(|e| Error::SigningError(e.to_string()))?;
-        let signature = signer.sign_to_vec()
-            .map_err(|e|Error::SigningError(e.to_string()))?;
-        Ok(Base64(signature))
+    fn verify_result(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {
 
-    }
+        let n = match &self.keypair {
+            Some(key) => {
+                key.rsa().unwrap().n().to_vec()
+            }
+            _ => {
+                self.n.to_vec()
+            }
+        };
 
-    pub fn verify(&self,  message: &[u8], signature: &[u8]) -> Result<(), Error> {
-        let mut verify = Verifier::new(MessageDigest::sha256(), &self.keypair).map_err(|_| Error::InvalidSignature).unwrap();
+        let pkey = PKey::from_rsa(Rsa::from_public_components(
+            BigNum::from_slice(&n).map_err(|_| Error::InvalidSignature).unwrap(),
+            BigNum::from_slice(&Base64::from_str("AQAB").unwrap().0).map_err(|_| Error::InvalidSignature).unwrap()
+                ).map_err(|_| Error::InvalidSignature).unwrap())
+            .map_err(|_| Error::InvalidSignature).unwrap();
+
+        let mut verify = Verifier::new(MessageDigest::sha256(), &pkey).map_err(|_| Error::InvalidSignature).unwrap();
         verify.set_rsa_padding(Padding::PKCS1_PSS).map_err(|_| Error::InvalidSignature).unwrap();
         verify.update(message).map_err(|_| Error::InvalidSignature).unwrap();
         verify.verify(signature).map_err(|_| Error::InvalidSignature).map(|_| ())
     }
-}
-
-pub fn verify_with_pub_key_n(n: &[u8], message: &[u8], signature: &[u8]) -> Result<(), Error> {
-
-    let n = BigNum::from_slice(n).map_err(|_| Error::InvalidSignature).unwrap();
-    let e = BigNum::from_slice(&Base64::from_str("AQAB").unwrap().0).map_err(|_| Error::InvalidSignature).unwrap();
-    let rsa_pub_key = Rsa::from_public_components(n,e)
-        .map_err(|_| Error::InvalidSignature).unwrap();
-
-    let pkey = PKey::from_rsa(rsa_pub_key).map_err(|_| Error::InvalidSignature).unwrap();
-    let mut verify = Verifier::new(MessageDigest::sha256(), &pkey).map_err(|_| Error::InvalidSignature).unwrap();
-    verify.set_rsa_padding(Padding::PKCS1_PSS).map_err(|_| Error::InvalidSignature).unwrap();
-    verify.update(message).map_err(|_| Error::InvalidSignature).unwrap();
-    verify.verify(signature).map_err(|_| Error::InvalidSignature).map(|_| ())
-
 
 }
 
@@ -90,23 +227,19 @@ mod tests {
     use std::{path::PathBuf, str::FromStr};
 
     use crate::{
-        crypto::{base64::Base64, sign::JwkSigner},
+        crypto::{base64::Base64, sign::ArweaveSigner, sign::Signer},
         error,
     };
 
     const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
 
-    impl Default for JwkSigner {
-        fn default() -> Self {
-            let path = PathBuf::from_str(DEFAULT_WALLET_PATH).unwrap();
-            Self::from_keypair_path(path).expect("Could not create signer")
-        }
-    }
+    const TEST_BUNDLER_FILE: &str = "res/test_bundle.json";
+
 
     #[test]
     fn test_default_keypair() {
         let path = PathBuf::from_str(DEFAULT_WALLET_PATH).unwrap();
-        let provider = JwkSigner::from_keypair_path(path).expect("Valid wallet file");
+        let provider = ArweaveSigner::from_keypair_path(path).expect("Valid wallet file");
         assert_eq!(
             provider.wallet_address().to_string(),
             "ggHWyKn0I_CTtsyyt2OR85sPYz9OvKLd9DYIvRQ2ET4"
@@ -124,15 +257,14 @@ mod tests {
             .to_vec(),
         );
         let path = PathBuf::from_str("res/test_wallet.json").expect("Could not open .wallet.json");
-        let provider = JwkSigner::from_keypair_path(path)?;
+        let provider = ArweaveSigner::from_keypair_path(path)?;
         let signature = provider.sign(&message.0).unwrap();
         let pubk = provider.public_key();
-        println!("pubk: {}", &pubk.to_string());
-        println!("message: {}", &message.to_string());
-        println!("sig: {}", &signature.to_string());
 
         //TODO: implement verification
-        provider.verify(&message.0, &signature.0).expect("verify failed");
+        assert_eq!(provider.verify(&message.0, &signature), true);
         Ok(())
     }
+
+
 }

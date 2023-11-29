@@ -8,7 +8,7 @@ use crate::crypto::base64::Base64;
 trait ItemSigner {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error>;
     fn verify(&self, message: &[u8], signature: &[u8]) -> bool;
-    fn public_key(&self) -> Base64;
+    fn public_key(&self) -> Result<Base64, Error>;
 }
 
 pub struct BundleItem<T> {
@@ -37,7 +37,7 @@ impl<T: ItemSigner> BundleItem<T> {
         self.anchor = o.anchor;
         self.target = o.target;
         self.tags = o.tags;
-        self.owner = s.public_key()
+        self.owner = s.public_key().unwrap()
         // self.item = r //todo
     }
 
@@ -50,10 +50,10 @@ impl<T: ItemSigner> BundleItem<T> {
         Ok(())
     }
 
-    fn generate_item_meta_binary(&mut self) -> Result<Vec<u8>, Error> {
-        let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend( short_to_2_byte_array(self.signature_type as u64));
-    }
+    // fn generate_item_meta_binary(&mut self) -> Result<Vec<u8>, Error> {
+    //     let mut bytes: Vec<u8> = Vec::new();
+    //     bytes.extend( short_to_2_byte_array(self.signature_type as u64));
+    // }
 }
 
 impl<'a, T> ToItems<'a, BundleItem<T>> for BundleItem<T> {

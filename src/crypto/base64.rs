@@ -1,7 +1,6 @@
 use std::str::FromStr;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use base64::{Engine as _, engine::general_purpose};
-
 use crate::error::Error;
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
@@ -16,7 +15,7 @@ impl std::fmt::Display for Base64 {
     }
 }
 
-impl TryFrom<String>for Base64 {
+impl TryFrom<String> for Base64 {
     type Error = base64::DecodeError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {

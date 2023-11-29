@@ -6,9 +6,8 @@ use crate::{
         base64::Base64,
         hash::{DeepHashItem, ToItems},
         merkle::{generate_data_root,  generate_reader_leaves, Node, Proof, resolve_proofs},
-        Provider,
         hash::{deep_hash, Hasher},
-        sign::verify_with_pub_key_n,
+        sign::Signer,
         reader::{ TransactionReader},
     },
     currency::Currency,
@@ -19,6 +18,7 @@ use crate::{
     },
     error::Error,
 };
+use crate::crypto::sign::ArweaveSigner;
 
 #[derive(Deserialize, Debug, Default, PartialEq)]
 pub struct Transaction<T: TransactionReader + Default + Sync> {
@@ -92,7 +92,7 @@ impl<'a, T: TransactionReader + Default + Sync>  ToItems<'a, Transaction<T>> for
 impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
-        crypto: &Provider,
+        crypto: Box<dyn Signer>,
         target: Base64,
         data: T,
         quantity: u128,
@@ -105,7 +105,7 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
         }
 
         let mut transaction = Transaction::generate_merkle(data).await.unwrap();
-        transaction.owner = crypto.keypair_modulus();
+        transaction.owner = crypto.public_key()?;
 
         let mut tags = vec![];
         tags.extend(other_tags);
@@ -119,10 +119,10 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
         transaction.target = target;
 
         let deep_hash_item = transaction.to_deep_hash_item()?;
-        let signature_data = crypto.deep_hash(deep_hash_item);
+        let signature_data = deep_hash(deep_hash_item);
         let signature = crypto.sign(&signature_data)?;
-        let id = crypto.hash_sha256(&signature.0);
-        transaction.signature = signature;
+        let id = signature.as_slice().sha256();
+        transaction.signature = Base64::from(signature.as_slice());
         transaction.id = Base64(id.to_vec());
 
         Ok(transaction)
@@ -208,8 +208,12 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
         let deep_hash_item = self.to_deep_hash_item()?;
         let message = deep_hash(deep_hash_item);
 
-        verify_with_pub_key_n(&self.owner.0, &message, &self.signature.0).map(|_| ())
-            .map_err(|_| { Error::InvalidSignature })
+        let singer = ArweaveSigner::from_owner(Base64::from(self.owner.0.as_slice())).unwrap();
+        if singer.verify(&message, &self.signature.0) {
+            Ok(())
+        } else {
+            Err(Error::InvalidSignature)
+        }
     }
 }
 
