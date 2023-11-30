@@ -6,7 +6,6 @@ use sha2::Digest;
 use std::{fs, path::PathBuf};
 use std::str::FromStr;
 use bip39::Language::English;
-use bitcoin::hex::DisplayHex;
 
 use super::base64::Base64;
 use boring::{
@@ -17,6 +16,8 @@ use boring::{
     bn::BigNum,
 };
 use ethsign::SecretKey;
+
+use sha3::{Digest as _,  Keccak256};
 
 pub trait Signer {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error>;
@@ -41,11 +42,22 @@ impl Signer for EthSigner {
 
         match &self.key {
             Some(key) => {
-                let sig = key.sign(message).map_err(|err|Error::SigningError("eth sign".to_string()))?;
+                let message_len = message.len().to_string();
+                let mut hasher = Keccak256::new();
+                let mut eth_message = vec![];
+                eth_message.push("\x19Ethereum Signed Message:\n".as_bytes());
+                eth_message.push(message_len.as_bytes());
+                eth_message.push(&message);
+                let i = eth_message.concat();
+                hasher.update(i.as_slice());
+                let result = hasher.finalize();
+
+                let result = &result[..];
+                let sig = key.sign(result).map_err(|err|Error::SigningError(err.to_string()))?;
                 let mut r = [0u8; 65];
-                r[0] = sig.v;
-                r[1..33].copy_from_slice(&sig.r);
-                r[33..65].copy_from_slice(&sig.s);
+                r[64] = sig.v + 27;
+                r[0..32].copy_from_slice(&sig.r);
+                r[32..64].copy_from_slice(&sig.s);
                 Ok(r.to_vec())
             }
             _ => {
@@ -67,11 +79,14 @@ impl Signer for EthSigner {
             _ => { return Err(Error::InvalidKeyError) }
         };
 
-        Ok(Base64::from(key.public().bytes().as_slice()))
+        let mut r = vec![];
+        r.push(4);
+        r.extend(key.public().bytes());
+        Ok(Base64::from(r.as_slice()))
     }
 
     fn wallet_address(&self) -> String {
-        ethaddr::Address::from_slice(&self.address).to_lower_hex_string()
+        format!("{}", ethaddr::Address::from_slice(&self.address))
     }
 }
 
@@ -81,7 +96,17 @@ impl EthSigner {
         let pri_key = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Bitcoin, seed.to_seed(passphrase).as_ref()).map_err(|_| Error::MnemonicDecodeError)?;
         let x = pri_key.private_key;
 
-        let eth_pri_key = ethsign::SecretKey::from_raw(x.secret_bytes().as_slice()).unwrap();
+        let eth_pri_key = SecretKey::from_raw(x.secret_bytes().as_slice()).map_err(|_|Error::InvalidKeyError)?;
+        Ok(Self {
+            key: Some(eth_pri_key.clone()),
+            address: eth_pri_key.public().address().clone(),
+        })
+    }
+
+    fn from_prv_hex(prv: &str) -> Result<EthSigner, Error> {
+        let decode_key = hex::decode(prv).map_err(|_|Error::InvalidKeyError)?;
+
+        let eth_pri_key = SecretKey::from_raw(decode_key.as_slice()).map_err(|_|Error::InvalidKeyError)?;
         Ok(Self {
             key: Some(eth_pri_key.clone()),
             address: eth_pri_key.public().address().clone(),
@@ -95,6 +120,7 @@ impl EthSigner {
             address: addr.0,
         })
     }
+
     fn from_pubkey(key: &[u8]) -> Result<EthSigner, Error> {
         let key = ethsign::PublicKey::from_slice(key).map_err(|_| Error::AddressDecodeError)?;
         Ok(Self {
@@ -230,6 +256,7 @@ mod tests {
         crypto::{base64::Base64, sign::ArweaveSigner, sign::Signer},
         error,
     };
+    use crate::crypto::sign::EthSigner;
 
     const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
 
@@ -266,5 +293,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_eth_signer() -> Result<(), error::Error> {
+
+        let signer = EthSigner::from_prv_hex("1f534ac18009182c07d266fe4a7903c0bcc8a66190f0967b719b2b3974a69c2f")?;
+        println!("{}", signer.wallet_address());
+
+        let signer_owner = signer.public_key()?;
+
+        println!("{}", signer_owner);
+        Ok(())
+
+    }
+
+    #[test]
+    fn test_eth_verify() -> Result<(), error::Error> {
+        let message = Base64::from_str("MFNXFMKDurrmwEZYoH99MVPg9pLodCgz5moTcBq2xtVrP1RQDgYit5WQgJ8h42BU").unwrap();
+
+        let signer = EthSigner::from_prv_hex("1f534ac18009182c07d266fe4a7903c0bcc8a66190f0967b719b2b3974a69c2f")?;
+        println!("{}", signer.wallet_address());
+        let res = signer.sign(&message.0)?;
+
+        let sig_str = Base64::from(res.as_slice()).to_string();
+
+        println!("{}", sig_str);
+        Ok(())
+
+    }
 
 }
