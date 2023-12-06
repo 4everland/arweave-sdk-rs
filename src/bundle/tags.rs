@@ -128,10 +128,7 @@ mod tests {
         let mut tags = setup();
         let v = to_value(&tags).unwrap();
         let empty = Value::Union(0, Box::new(Value::Null));
-        assert_ne!(v, empty);
-        // if v == empty {
-        //     return assert_eq!(Tags { tags: vec![] }, tags);
-        // }
+        assert_ne!(Tags { tags: vec![] }, tags);
         let deserialized = from_value::<Tags>(&v).unwrap();
         assert_eq!(deserialized, tags);
     }

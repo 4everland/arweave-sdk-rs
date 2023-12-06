@@ -110,7 +110,7 @@ impl EthSigner {
         })
     }
 
-    fn from_prv_hex(prv: &str) -> Result<EthSigner, Error> {
+    pub fn from_prv_hex(prv: &str) -> Result<EthSigner, Error> {
         let decode_key = hex::decode(prv).map_err(|_|Error::InvalidKeyError)?;
 
         let key = libsecp256k1::SecretKey::parse_slice(decode_key.as_slice()).map_err(|_|Error::InvalidKeyError)?;

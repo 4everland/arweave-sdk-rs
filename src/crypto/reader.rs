@@ -1,9 +1,12 @@
 use std::io::{SeekFrom};
 use async_trait::async_trait;
 use bytes::BytesMut;
+use sha2::Sha384;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use crate::crypto::base64::Base64;
+use crate::crypto::hash::Hasher;
+use crate::crypto::merkle::{Chunks, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
 use crate::error::Error;
 
 #[async_trait]
@@ -114,3 +117,25 @@ impl TransactionReader for File {
 
 
 
+// impl  Hasher<'_, dyn TransactionReader> for dyn TransactionReader {
+//     fn sha256(&self) -> [u8; 32] {
+//         todo!()
+//     }
+//
+//     async fn sha384(& self) -> [u8; 48] {
+//         use sha2::Digest;
+//         let length = self.length().await.unwrap();
+//         let chunks = Chunks::new(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE,  length);
+//
+//         let mut context =  Sha384::new();
+//         for chunk in chunks.0 {
+//             let data_hash = self.chunk_read(chunk.0, chunk.1).await.unwrap();
+//             context.update(data_hash);
+//         }
+//
+//         let result = context.finalize();
+//         let mut hash = [0; 48];
+//         hash.copy_from_slice(&result[..]);
+//         hash
+//     }
+// }

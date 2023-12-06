@@ -1,4 +1,7 @@
-use sha2::Digest;
+use k256::elliptic_curve::bigint::modular::runtime_mod::DynResidue;
+use sha2::{Digest, Sha384};
+use crate::crypto::merkle::{Chunks, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
+use crate::crypto::reader::TransactionReader;
 
 use crate::error::Error;
 
@@ -26,7 +29,7 @@ impl Hasher<'_, &[u8]> for &[u8] {
     }
 }
 
-impl <const N: usize> Hasher<'_, &[u8; N]> for &[u8; N] {
+impl<const N: usize> Hasher<'_, &[u8; N]> for &[u8; N] {
     fn sha256(&self) -> [u8; 32] {
         self.as_slice().sha256()
     }
@@ -37,10 +40,9 @@ impl <const N: usize> Hasher<'_, &[u8; N]> for &[u8; N] {
 }
 
 
-
-impl <const N: usize> Hasher<'_, Vec<&[u8; N]>> for Vec<&[u8; N]> {
+impl<const N: usize> Hasher<'_, Vec<&[u8; N]>> for Vec<&[u8; N]> {
     fn sha256(&self) -> [u8; 32] {
-         let hash: Vec<u8> = self.into_iter()
+        let hash: Vec<u8> = self.into_iter()
             .flat_map(|&u| u.as_slice().sha256()).collect();
         hash.as_slice().sha256()
     }
@@ -51,7 +53,7 @@ impl <const N: usize> Hasher<'_, Vec<&[u8; N]>> for Vec<&[u8; N]> {
     }
 }
 
-impl  Hasher<'_, Vec<&[u8]>> for Vec<&[u8]> {
+impl Hasher<'_, Vec<&[u8]>> for Vec<&[u8]> {
     fn sha256(&self) -> [u8; 32] {
         let hash: Vec<u8> = self.into_iter().flat_map(|&u| u.sha256()).collect();
         hash.as_slice().sha256()
@@ -67,6 +69,8 @@ impl  Hasher<'_, Vec<&[u8]>> for Vec<&[u8]> {
 pub enum DeepHashItem {
     Blob(Vec<u8>),
     List(Vec<DeepHashItem>),
+    Origin([u8; 48]),
+    // Read(Box<dyn  TransactionReader>)
 }
 
 impl DeepHashItem {
@@ -87,6 +91,7 @@ pub trait ToItems<'a, T> {
 /// nested [`Vec<u8>`] of arbitrary depth.
 pub fn deep_hash(deep_hash_item: DeepHashItem) -> [u8; 48] {
     let hash = match deep_hash_item {
+        DeepHashItem::Origin(o) => o,
         DeepHashItem::Blob(blob) => {
             let blob_tag = format!("blob{}", blob.len());
             (vec![blob_tag.as_bytes(), &blob]).sha384()
@@ -98,13 +103,28 @@ pub fn deep_hash(deep_hash_item: DeepHashItem) -> [u8; 48] {
             for child in list.into_iter() {
                 let child_hash = deep_hash(child);
                 hash = [hash, child_hash].concat().as_slice().sha384();
-
             }
             hash
         }
     };
     hash
 }
+
+pub async fn deep_hash_reader(r: &mut dyn TransactionReader) -> [u8; 48] {
+    use sha2::Digest;
+    let length = r.length().await.unwrap();
+    let blob_tag = format!("blob{}", length);
+    let chunks = Chunks::new(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE, length);
+
+    let mut context = Sha384::new();
+    for chunk in chunks.0 {
+        let data_hash = r.chunk_read(chunk.0, chunk.1).await.unwrap();
+        context.update(data_hash);
+    }
+    let result = context.finalize();
+    [&blob_tag.as_bytes().sha384(), &result[..]].concat().as_slice().sha384()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs::File, io::Read};

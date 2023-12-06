@@ -126,12 +126,12 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
     Ok(leaves)
 }
 
-struct Chunks (
-    Vec<(usize, usize)>,
+pub struct Chunks (
+    pub(crate) Vec<(usize, usize)>,
 );
 
 impl Chunks {
-    fn new(min: usize, max: usize, len: usize) -> Self {
+    pub(crate) fn new(min: usize, max: usize, len: usize) -> Self {
         let count = len / max;
 
         if count == 0 {
