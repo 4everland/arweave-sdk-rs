@@ -1,5 +1,4 @@
 //! Functionality for creating and verifying signatures and hashing.
-
 use crate::error::Error;
 use jsonwebkey as jwk;
 use sha2::Digest;
@@ -15,7 +14,6 @@ use boring::{
     hash::MessageDigest,
     bn::BigNum,
 };
-use ethsign::SecretKey;
 
 use sha3::{Digest as _,  Keccak256};
 
@@ -34,7 +32,7 @@ pub struct ArweaveSigner {
 }
 
 pub struct EthSigner {
-    key: Option<ethsign::SecretKey>,
+    key: Option<libsecp256k1::SecretKey>,
     address: [u8; 20],
 }
 impl Signer for EthSigner {
@@ -53,11 +51,14 @@ impl Signer for EthSigner {
                 let result = hasher.finalize();
 
                 let result = &result[..];
-                let sig = key.sign(result).map_err(|err|Error::SigningError(err.to_string()))?;
+                let msg = libsecp256k1::Message::parse_slice(result).map_err(|err|Error::SigningError(err.to_string()))?;
+
+                let (sig, rec_id) = libsecp256k1::sign(&msg, key);
+
                 let mut r = [0u8; 65];
-                r[64] = sig.v + 27;
-                r[0..32].copy_from_slice(&sig.r);
-                r[32..64].copy_from_slice(&sig.s);
+                r[64] = rec_id.serialize() + 27;
+                sig.r.fill_b32((&mut r[0..32]).try_into().unwrap());
+                sig.s.fill_b32((&mut r[32..64]).try_into().unwrap());
                 Ok(r.to_vec())
             }
             _ => {
@@ -79,10 +80,8 @@ impl Signer for EthSigner {
             _ => { return Err(Error::InvalidKeyError) }
         };
 
-        let mut r = vec![];
-        r.push(4);
-        r.extend(key.public().bytes());
-        Ok(Base64::from(r.as_slice()))
+        let pub_key = libsecp256k1::PublicKey::from_secret_key(&key);
+        Ok(Base64::from(pub_key.serialize().as_slice()))
     }
 
     fn wallet_address(&self) -> String {
@@ -96,20 +95,36 @@ impl EthSigner {
         let pri_key = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Bitcoin, seed.to_seed(passphrase).as_ref()).map_err(|_| Error::MnemonicDecodeError)?;
         let x = pri_key.private_key;
 
-        let eth_pri_key = SecretKey::from_raw(x.secret_bytes().as_slice()).map_err(|_|Error::InvalidKeyError)?;
+        let key = libsecp256k1::SecretKey::parse_slice(x.secret_bytes().as_slice()).map_err(|_|Error::InvalidKeyError)?;
+        let pub_key = libsecp256k1::PublicKey::from_secret_key(&key);
+
+        let mut address = [0u8; 20];
+        let mut hasher = Keccak256::new();
+        hasher.update(&pub_key.serialize()[1..]);
+        let result = hasher.finalize();
+        address.copy_from_slice(&result[12..]);
+
         Ok(Self {
-            key: Some(eth_pri_key.clone()),
-            address: eth_pri_key.public().address().clone(),
+            key: Some(key),
+            address,
         })
     }
 
     fn from_prv_hex(prv: &str) -> Result<EthSigner, Error> {
         let decode_key = hex::decode(prv).map_err(|_|Error::InvalidKeyError)?;
 
-        let eth_pri_key = SecretKey::from_raw(decode_key.as_slice()).map_err(|_|Error::InvalidKeyError)?;
+        let key = libsecp256k1::SecretKey::parse_slice(decode_key.as_slice()).map_err(|_|Error::InvalidKeyError)?;
+        let pub_key = libsecp256k1::PublicKey::from_secret_key(&key);
+
+        let mut address = [0u8; 20];
+        let mut hasher = Keccak256::new();
+        hasher.update(&pub_key.serialize()[1..]);
+        let result = hasher.finalize();
+        address.copy_from_slice(&result[12..]);
+
         Ok(Self {
-            key: Some(eth_pri_key.clone()),
-            address: eth_pri_key.public().address().clone(),
+            key: Some(key),
+            address,
         })
     }
 
@@ -122,35 +137,40 @@ impl EthSigner {
     }
 
     fn from_pubkey(key: &[u8]) -> Result<EthSigner, Error> {
-        let key = ethsign::PublicKey::from_slice(key).map_err(|_| Error::AddressDecodeError)?;
+        let key = libsecp256k1::PublicKey::parse_slice(key, None).map_err(|_| Error::AddressDecodeError)?;
+        let mut address = [0u8; 20];
+        let mut hasher = Keccak256::new();
+        hasher.update(&key.serialize()[1..]);
+        let result = hasher.finalize();
+        address.copy_from_slice(&result[12..]);
+
         Ok(Self {
             key: None,
-            address: key.address().clone(),
+            address,
         })
     }
+
     fn verify_result(&self, message: &[u8], signature: &[u8]) -> Result<(), Error> {
         if signature.len() != 65 {
             return Err(Error::InvalidSignature)
         }
-        let mut r = [0u8; 32];
-        r.copy_from_slice(&signature[1..33]);
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&signature[33..65]);
 
-        let sig = ethsign::Signature{
-            v: signature[0],
-            r,
-            s,
-        };
-        let key = sig.recover(message).map_err(|_|Error::InvalidSignature)?;
-        if key.address().eq(&self.address) {
+        let rec_id = libsecp256k1::RecoveryId::parse(signature[0]).map_err(|_|Error::InvalidSignature)?;
+        let sig = libsecp256k1::Signature::parse_standard_slice(&signature[1..]).map_err(|_|Error::InvalidSignature)?;
+        let msg = libsecp256k1::Message::parse_slice(&message).map_err(|_|Error::InvalidSignature)?;
+        let pubkey = libsecp256k1::recover(&msg, &sig, &rec_id).map_err(|_|Error::InvalidSignature)?;
+        let mut address = [0u8; 20];
+
+        let mut hasher = Keccak256::new();
+        hasher.update(&pubkey.serialize()[1..]);
+        let result = hasher.finalize();
+        address.copy_from_slice(&result[12..]);
+        if address.eq(&self.address) {
             Ok(())
         } else {
             Err(Error::InvalidSignature)
         }
     }
-
-
 }
 
 impl Signer for ArweaveSigner {
@@ -257,6 +277,7 @@ mod tests {
         error,
     };
     use crate::crypto::sign::EthSigner;
+    use crate::error::Error;
 
     const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
 
@@ -307,16 +328,25 @@ mod tests {
     }
 
     #[test]
+    fn test_eth_pub_key() -> Result<(), error::Error> {
+        let decode_key = hex::decode("02D0E95DEE9217777132128ACA9CE7191EA391ACCB83FF47B5C984D8823FAD331E").map_err(|_| {
+            Error::InvalidKeyError
+        })?;
+        let signer = EthSigner::from_pubkey(decode_key.as_slice())?;
+        assert_eq!(signer.wallet_address(), "0x02A71bA6943D302c0152cdb237CB606ffE1C9BC4");
+        Ok(())
+
+    }
+
+    #[test]
     fn test_eth_verify() -> Result<(), error::Error> {
         let message = Base64::from_str("MFNXFMKDurrmwEZYoH99MVPg9pLodCgz5moTcBq2xtVrP1RQDgYit5WQgJ8h42BU").unwrap();
 
         let signer = EthSigner::from_prv_hex("1f534ac18009182c07d266fe4a7903c0bcc8a66190f0967b719b2b3974a69c2f")?;
-        println!("{}", signer.wallet_address());
         let res = signer.sign(&message.0)?;
-
         let sig_str = Base64::from(res.as_slice()).to_string();
 
-        println!("{}", sig_str);
+        assert_eq!("GqZprDMkQ7ULQwsXJz3PL2FTqEu5Lok3fC77-HZAzXU27ZN8RABV_E8otYK4qQyVV6LEx_ko7dpY_CSu-v8mBhw", sig_str);
         Ok(())
 
     }
