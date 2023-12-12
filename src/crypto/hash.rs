@@ -1,7 +1,5 @@
-use k256::elliptic_curve::bigint::modular::runtime_mod::DynResidue;
 use sha2::{Digest, Sha384};
-use crate::crypto::merkle::{Chunks, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
-use crate::crypto::reader::TransactionReader;
+use tokio::io::AsyncReadExt;
 
 use crate::error::Error;
 
@@ -39,16 +37,20 @@ impl<const N: usize> Hasher<'_, &[u8; N]> for &[u8; N] {
     }
 }
 
-
 impl<const N: usize> Hasher<'_, Vec<&[u8; N]>> for Vec<&[u8; N]> {
     fn sha256(&self) -> [u8; 32] {
-        let hash: Vec<u8> = self.into_iter()
-            .flat_map(|&u| u.as_slice().sha256()).collect();
+        let hash: Vec<u8> = self
+            .into_iter()
+            .flat_map(|&u| u.as_slice().sha256())
+            .collect();
         hash.as_slice().sha256()
     }
 
     fn sha384(&self) -> [u8; 48] {
-        let hash: Vec<u8> = self.into_iter().flat_map(|&u| u.as_slice().sha384()).collect();
+        let hash: Vec<u8> = self
+            .into_iter()
+            .flat_map(|&u| u.as_slice().sha384())
+            .collect();
         hash.as_slice().sha384()
     }
 }
@@ -110,31 +112,16 @@ pub fn deep_hash(deep_hash_item: DeepHashItem) -> [u8; 48] {
     hash
 }
 
-pub async fn deep_hash_reader(r: &mut dyn TransactionReader) -> [u8; 48] {
-    use sha2::Digest;
-    let length = r.length().await.unwrap();
-    let blob_tag = format!("blob{}", length);
-    let chunks = Chunks::new(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE, length);
-
-    let mut context = Sha384::new();
-    for chunk in chunks.0 {
-        let data_hash = r.chunk_read(chunk.0, chunk.1).await.unwrap();
-        context.update(data_hash);
-    }
-    let result = context.finalize();
-    [&blob_tag.as_bytes().sha384(), &result[..]].concat().as_slice().sha384()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs::File, io::Read};
 
+    use crate::crypto::base64::Base64;
     use crate::{
         crypto::hash::{deep_hash, ToItems},
         error::Error,
         transaction::transaction::Transaction,
     };
-    use crate::crypto::base64::Base64;
 
     #[tokio::test]
     async fn test_deep_hash() -> Result<(), Error> {
@@ -142,14 +129,15 @@ mod tests {
         let mut data = String::new();
         file.read_to_string(&mut data).unwrap();
 
-        let tx: Transaction<Base64> = data.as_str().try_into()?;
+        let tx: Transaction = data.as_str().try_into()?;
 
         let actual_hash = deep_hash(tx.to_deep_hash_item().unwrap());
 
-        let correct_hash: [u8; 48] = [39, 16, 175, 205, 64, 3, 182, 248, 240, 38,
-            169, 233, 4, 140, 97, 83, 148, 224, 29, 119, 70, 146, 76, 254, 217,
-            238, 208, 164, 251, 217, 161, 48, 47, 132, 144, 116, 27, 246, 32, 205,
-            17, 227, 169, 8, 39, 205, 27, 78];
+        let correct_hash: [u8; 48] = [
+            39, 16, 175, 205, 64, 3, 182, 248, 240, 38, 169, 233, 4, 140, 97, 83, 148, 224, 29,
+            119, 70, 146, 76, 254, 217, 238, 208, 164, 251, 217, 161, 48, 47, 132, 144, 116, 27,
+            246, 32, 205, 17, 227, 169, 8, 39, 205, 27, 78,
+        ];
         assert_eq!(actual_hash, correct_hash);
 
         Ok(())

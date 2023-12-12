@@ -1,9 +1,9 @@
 //! Functionality for chunking file data and calculating and verifying root ids.
+use super::hash::Hasher;
+use crate::error::Error;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
-use crate::crypto::reader::TransactionReader;
-use crate::error::Error;
-use super::hash::{Hasher};
+use tokio::io::AsyncReadExt;
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -40,7 +40,6 @@ pub struct BranchProof {
     notepad: [u8; NOTE_SIZE - 8],
     offset: [u8; 8],
 }
-
 
 /// Includes methods to deserialize [`Proof`]s.
 pub trait ProofDeserialize<T> {
@@ -111,7 +110,7 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
         let max_byte_range = min_byte_range + chunk.len();
         let offset = max_byte_range.to_note_vec();
         let id = (vec![data_hash.as_slice(), &offset]).sha256();
-            //hash_all_sha256(vec![&data_hash, &offset]);
+        //hash_all_sha256(vec![&data_hash, &offset]);
 
         leaves.push(Node {
             id,
@@ -126,70 +125,55 @@ pub fn generate_leaves(data: Vec<u8>) -> Result<Vec<Node>, Error> {
     Ok(leaves)
 }
 
-pub struct Chunks (
-    pub(crate) Vec<(usize, usize)>,
-);
+pub struct Chunks(Vec<(usize, usize)>);
 
 impl Chunks {
     pub(crate) fn new(min: usize, max: usize, len: usize) -> Self {
         let count = len / max;
 
         if count == 0 {
-            return Self(vec![(0, len)])
+            return Self(vec![(0, len)]);
         }
         let last = len - count * max;
         if count == 1 {
             if last < min {
-                return  Self(vec![(0, (len + 1)/2), ((len + 1)/2, len)])
+                return Self(vec![(0, (len + 1) / 2), ((len + 1) / 2, len)]);
             }
-            return Self(vec![(0, max), (max, len)])
+            return Self(vec![(0, max), (max, len)]);
         }
-        let mut chunks: Vec<(usize, usize)> = (0..(count-1)).map(|i|(i * max, (i+1) * max)).collect();
+        let mut chunks: Vec<(usize, usize)> =
+            (0..(count - 1)).map(|i| (i * max, (i + 1) * max)).collect();
         if last == 0 {
-            chunks.push(((count-1) * max, len));
+            chunks.push(((count - 1) * max, len));
             chunks.push((len, len));
-            return Self(chunks)
+            return Self(chunks);
         }
 
         if last < min {
-            let split_pos = (len - ((count-1) * max ) + 1)  / 2 + ((count-1) * max);
-            chunks.push(((count-1) * max, split_pos));
+            let split_pos = (len - ((count - 1) * max) + 1) / 2 + ((count - 1) * max);
+            chunks.push(((count - 1) * max, split_pos));
             chunks.push((split_pos, len));
-            return  Self(chunks)
+            return Self(chunks);
         }
-        chunks.push(((count-1) * max, count * max));
+        chunks.push(((count - 1) * max, count * max));
         chunks.push((count * max, len));
 
         Self(chunks)
     }
 }
-pub async fn generate_reader_leaves(r:  &mut dyn TransactionReader) -> Result<Vec<Node>, Error> {
-    let length = r.length().await.unwrap();
-    let chunks = Chunks::new(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE,  length);
 
-    let mut leaves = Vec::<Node>::new();
-    for chunk in chunks.0 {
-        let data_hash = r.chunk_read(chunk.0, chunk.1).await.unwrap().as_slice().sha256();
-        let offset =  chunk.1.to_note_vec();
-        let id = (vec![data_hash.as_slice(), &offset]).sha256();
-
-        leaves.push(Node {
-            id,
-            data_hash: Some(data_hash),
-            min_byte_range: chunk.0,
-            max_byte_range: chunk.1,
-            left_child: None,
-            right_child: None,
-        });
+impl Iterator for Chunks {
+    type Item = (usize, usize);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.pop()
     }
-    Ok(leaves)
 }
 
 /// Hashes together a single branch node from a pair of child nodes.
 pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
     let max_byte_range = left.max_byte_range.to_note_vec();
     let id = vec![left.id.as_slice(), right.id.as_slice(), &max_byte_range].sha256();
-        //hash_all_sha256(vec![&left.id, &right.id, &max_byte_range]);
+    //hash_all_sha256(vec![&left.id, &right.id, &max_byte_range]);
     Ok(Node {
         id,
         data_hash: None,
@@ -300,7 +284,8 @@ pub fn validate_chunk(
                     branch_proof.left_id.as_slice(),
                     branch_proof.right_id.as_slice(),
                     &branch_proof.offset().to_note_vec(),
-                ].sha256();
+                ]
+                .sha256();
 
                 //     hash_all_sha256(vec![
                 //     &branch_proof.left_id,
@@ -323,7 +308,7 @@ pub fn validate_chunk(
 
             // Validate leaf: both id and data_hash are correct.
             let id = vec![data_hash.as_slice(), &max_byte_range.to_note_vec()].sha256();
-                //hash_all_sha256(vec![&data_hash, &max_byte_range.to_note_vec()]);
+            //hash_all_sha256(vec![&data_hash, &max_byte_range.to_note_vec()]);
             if id != root_id && data_hash != leaf_proof.data_hash {
                 return Err(Error::InvalidProof);
             }
@@ -370,29 +355,29 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_generate_reader_leaves() -> Result<(), Error> {
-        let mut r = fs::File::open(ONE_MB_BIN).await.unwrap();
-        let leaves: Vec<Node> = generate_reader_leaves(&mut r).await.unwrap();
-        assert_eq!(
-            leaves[1],
-            Node {
-                id: [
-                    150, 140, 62, 98, 100, 155, 126, 244, 123, 14, 77, 145, 255, 57, 121, 21, 84,
-                    165, 206, 211, 202, 67, 131, 11, 39, 210, 169, 248, 184, 139, 57, 196
-                ],
-                data_hash: Some([
-                    180, 164, 178, 211, 99, 98, 88, 190, 204, 188, 124, 37, 51, 243, 251, 51, 119,
-                    17, 136, 254, 55, 145, 74, 45, 198, 87, 145, 82, 201, 114, 123, 62
-                ]),
-                min_byte_range: 262144,
-                max_byte_range: 524288,
-                left_child: None,
-                right_child: None
-            }
-        );
-        Ok(())
-    }
+    // #[tokio::test]
+    // async fn test_generate_reader_leaves() -> Result<(), Error> {
+    //     let mut r = fs::File::open(ONE_MB_BIN).await.unwrap();
+    //     let leaves: Vec<Node> = generate_reader_leaves(&mut r).await.unwrap();
+    //     assert_eq!(
+    //         leaves[1],
+    //         Node {
+    //             id: [
+    //                 150, 140, 62, 98, 100, 155, 126, 244, 123, 14, 77, 145, 255, 57, 121, 21, 84,
+    //                 165, 206, 211, 202, 67, 131, 11, 39, 210, 169, 248, 184, 139, 57, 196
+    //             ],
+    //             data_hash: Some([
+    //                 180, 164, 178, 211, 99, 98, 88, 190, 204, 188, 124, 37, 51, 243, 251, 51, 119,
+    //                 17, 136, 254, 55, 145, 74, 45, 198, 87, 145, 82, 201, 114, 123, 62
+    //             ]),
+    //             min_byte_range: 262144,
+    //             max_byte_range: 524288,
+    //             left_child: None,
+    //             right_child: None
+    //         }
+    //     );
+    //     Ok(())
+    // }
 
     #[tokio::test]
     async fn test_hash_branch() -> Result<(), Error> {

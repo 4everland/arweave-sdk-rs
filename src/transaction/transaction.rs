@@ -1,28 +1,31 @@
+use async_stream::try_stream;
+use futures::StreamExt;
+use serde::de::Visitor;
 use serde::Deserialize;
+use std::future::Future;
 use std::str::FromStr;
+use tokio::io::AsyncReadExt;
 
+use crate::bundle::item::BundleStreamFactory;
+use crate::crypto::merkle::{Chunks, Helpers, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
+use crate::crypto::sign::ArweaveSigner;
 use crate::{
     crypto::{
         base64::Base64,
-        hash::{DeepHashItem, ToItems},
-        merkle::{generate_data_root,  generate_reader_leaves, Node, Proof, resolve_proofs},
         hash::{deep_hash, Hasher},
+        hash::{DeepHashItem, ToItems},
+        merkle::{generate_data_root, resolve_proofs, Node, Proof},
         sign::Signer,
-        reader::{ TransactionReader},
     },
     currency::Currency,
-    transaction::tags::{Tag},
-    types::{
-        Chunk,
-        Transaction as JsonTransaction
-    },
     error::Error,
+    transaction::tags::Tag,
+    types::{Chunk, Transaction as JsonTransaction},
 };
-use crate::crypto::sign::ArweaveSigner;
+use futures_core::Stream;
 
 #[derive(Deserialize, Debug, Default, PartialEq)]
-pub struct Transaction<T: TransactionReader + Default + Sync> {
-    /* Fields required for signing */
+pub struct Transaction {
     pub format: u8,
     pub id: Base64,
     pub last_tx: Base64,
@@ -35,16 +38,9 @@ pub struct Transaction<T: TransactionReader + Default + Sync> {
     pub data_size: u64,
     pub reward: u64,
     pub signature: Base64,
-
-    #[serde(skip)]
-    pub data_reader: T,
-    #[serde(skip)]
-    pub chunks: Vec<Node>,
-    #[serde(skip)]
-    pub proofs: Vec<Proof>,
 }
 
-impl<'a, T: TransactionReader + Default + Sync>  ToItems<'a, Transaction<T>> for Transaction<T> {
+impl<'a> ToItems<'a, Transaction> for Transaction {
     fn to_deep_hash_item(&'a self) -> Result<DeepHashItem, Error> {
         match &self.format {
             1 => {
@@ -58,9 +54,9 @@ impl<'a, T: TransactionReader + Default + Sync>  ToItems<'a, Transaction<T>> for
                     &reward,
                     &self.last_tx,
                 ]
-                    .into_iter()
-                    .map(|op| DeepHashItem::from_item(&op.0))
-                    .collect();
+                .into_iter()
+                .map(|op| DeepHashItem::from_item(&op.0))
+                .collect();
                 children.push(self.tags.to_deep_hash_item()?);
 
                 Ok(DeepHashItem::from_children(children))
@@ -74,9 +70,9 @@ impl<'a, T: TransactionReader + Default + Sync>  ToItems<'a, Transaction<T>> for
                     self.reward.to_string().as_bytes(),
                     &self.last_tx.0,
                 ]
-                    .into_iter()
-                    .map(DeepHashItem::from_item)
-                    .collect();
+                .into_iter()
+                .map(DeepHashItem::from_item)
+                .collect();
                 children.push(self.tags.to_deep_hash_item().unwrap());
                 children.push(DeepHashItem::from_item(
                     self.data_size.to_string().as_bytes(),
@@ -89,12 +85,12 @@ impl<'a, T: TransactionReader + Default + Sync>  ToItems<'a, Transaction<T>> for
         }
     }
 }
-impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
+impl Transaction {
     #[allow(clippy::too_many_arguments)]
-    pub async fn new(
+    pub fn new(
         crypto: Box<dyn Signer>,
         target: Base64,
-        data: T,
+        chunks: Option<TransactionChunks>,
         quantity: u128,
         fee: u64,
         last_tx: Base64,
@@ -103,8 +99,21 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
         if quantity.lt(&0) {
             return Err(Error::InvalidValueForTx);
         }
-
-        let mut transaction = Transaction::generate_merkle(data).await.unwrap();
+        let empty = Base64(vec![]);
+        let mut transaction = match chunks {
+            Some(c) => Transaction {
+                format: 2,
+                data_size: c.data_size as u64,
+                data_root: c.data_root,
+                ..Default::default()
+            },
+            None => Transaction {
+                format: 2,
+                data_size: 0,
+                data_root: empty,
+                ..Default::default()
+            },
+        };
         transaction.owner = crypto.public_key()?;
 
         let mut tags = vec![];
@@ -128,42 +137,6 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
         Ok(transaction)
     }
 
-    async fn generate_merkle(mut data: T) -> Result<Transaction<T>, Error> {
-        if data.is_empty().await {
-            let empty = Base64(vec![]);
-            Ok(Transaction {
-                format: 2,
-                data_size: 0,
-                data_root: empty,
-                chunks: vec![],
-                proofs: vec![],
-                ..Default::default()
-            })
-        } else {
-            let mut chunks = generate_reader_leaves(&mut data).await.unwrap();
-            let root = generate_data_root(chunks.clone()).unwrap();
-            let data_root = Base64(root.id.into_iter().collect());
-            let mut proofs = resolve_proofs(root, None).unwrap();
-
-            // Discard the last chunk & proof if it's zero length.
-            let last_chunk = chunks.last().unwrap();
-            if last_chunk.max_byte_range == last_chunk.min_byte_range {
-                chunks.pop();
-                proofs.pop();
-            }
-
-            Ok(Transaction {
-                format: 2,
-                data_size: data.length().await.unwrap() as u64,
-                data_root,
-                chunks,
-                proofs,
-                data_reader: data,
-                ..Default::default()
-            })
-        }
-    }
-
     pub fn clone_with_no_data(&self) -> Result<Self, Error> {
         Ok(Self {
             format: self.format,
@@ -177,22 +150,7 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
             data_root: self.data_root.clone(),
             data_size: self.data_size,
             reward: self.reward,
-            data_reader: Default::default(),
             signature: self.signature.clone(),
-            chunks: Vec::new(),
-            proofs: Vec::new(),
-        })
-    }
-
-    pub async fn get_chunk(&mut self, idx: usize) -> Result<Chunk, Error> {
-        Ok(Chunk {
-            data_root: self.data_root.clone(),
-            data_size: self.data_size,
-            data_path: Base64(self.proofs[idx].proof.clone()),
-            offset: self.proofs[idx].offset,
-            chunk: Base64(
-                self.data_reader.chunk_read(self.chunks[idx].min_byte_range, self.chunks[idx].max_byte_range).await.unwrap().to_vec(),
-            ),
         })
     }
 
@@ -203,7 +161,7 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
 
         let id = self.signature.0.as_slice().sha256();
         if !Base64(id.to_vec()).eq(&self.id) {
-            return Err(Error::TransactionWrongId)
+            return Err(Error::TransactionWrongId);
         }
         let deep_hash_item = self.to_deep_hash_item()?;
         let message = deep_hash(deep_hash_item);
@@ -217,38 +175,187 @@ impl<T: TransactionReader + Default + 'static + Sync> Transaction<T> {
     }
 }
 
-
-
-impl TryFrom<JsonTransaction> for Transaction<Base64> {
+impl TryFrom<JsonTransaction> for Transaction {
     type Error = Error;
-    fn try_from(json_tx: JsonTransaction) -> Result< Self, Self::Error> {
-    let tags = json_tx.tags.iter().map(Tag::from).collect();
-    Ok(Transaction {
-        quantity: Currency::from_str( & json_tx.quantity).unwrap(),
-        format: json_tx.format,
-        id: json_tx.id.try_into().map_err(Error::Base64DecodeError) ?,
-        last_tx: json_tx.last_tx.try_into().map_err(Error::Base64DecodeError) ?,
-        owner: json_tx.owner.try_into().map_err(Error::Base64DecodeError) ?,
-        tags,
-        target: json_tx.target.try_into().map_err(Error::Base64DecodeError) ?,
-        data_root: json_tx.data_root.try_into().map_err(Error::Base64DecodeError) ?,
-        data: Base64::from_str(json_tx.data.as_str()).unwrap(),
-        data_reader: Base64::from_str(json_tx.data.as_str()).unwrap(),
-        data_size: u64::from_str( & json_tx.data_size).unwrap(),
-        reward: u64::from_str(& json_tx.reward).unwrap(),
-        signature: json_tx.signature.try_into().map_err(Error::Base64DecodeError) ?,
-        chunks: vec ! [],
-        proofs: vec ! [],
-    })
+    fn try_from(json_tx: JsonTransaction) -> Result<Self, Self::Error> {
+        let tags = json_tx.tags.iter().map(Tag::from).collect();
+        Ok(Transaction {
+            quantity: Currency::from_str(&json_tx.quantity).unwrap(),
+            format: json_tx.format,
+            id: json_tx.id.try_into().map_err(Error::Base64DecodeError)?,
+            last_tx: json_tx
+                .last_tx
+                .try_into()
+                .map_err(Error::Base64DecodeError)?,
+            owner: json_tx.owner.try_into().map_err(Error::Base64DecodeError)?,
+            tags,
+            target: json_tx
+                .target
+                .try_into()
+                .map_err(Error::Base64DecodeError)?,
+            data_root: json_tx
+                .data_root
+                .try_into()
+                .map_err(Error::Base64DecodeError)?,
+            data: Base64::from_str(json_tx.data.as_str()).unwrap(),
+            data_size: u64::from_str(&json_tx.data_size).unwrap(),
+            reward: u64::from_str(&json_tx.reward).unwrap(),
+            signature: json_tx
+                .signature
+                .try_into()
+                .map_err(Error::Base64DecodeError)?,
+        })
     }
 }
 
-impl TryFrom<&str> for Transaction<Base64> {
+impl TryFrom<&str> for Transaction {
     type Error = Error;
 
-    fn try_from(s: &str) -> Result< Self, Self::Error> {
-        let json_tx: JsonTransaction = serde_json::from_str(s).map_err(Error::SerdeJsonError) ?;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let json_tx: JsonTransaction = serde_json::from_str(s).map_err(Error::SerdeJsonError)?;
         Transaction::try_from(json_tx)
+    }
+}
+#[derive(Clone, Debug)]
+pub struct TransactionChunks {
+    chunks: Vec<Node>,
+    proofs: Vec<Proof>,
+    data_root: Base64,
+    data_size: usize,
+}
+
+pub struct TransactionChunksFactory<T: ?Sized> {
+    inner: Box<T>,
+    length: usize,
+    chunks: Option<TransactionChunks>,
+}
+
+impl<T> TransactionChunksFactory<T>
+where
+    T: BundleStreamFactory + ?Sized,
+{
+    pub fn new(inner: Box<T>) -> Result<TransactionChunksFactory<T>, Error> {
+        Ok(Self {
+            length: inner.length()?,
+            inner,
+            chunks: None,
+        })
+    }
+
+    pub async fn hash(&mut self) -> Result<TransactionChunks, Error> {
+        if self.chunks.is_none() {
+            let mut chunks = self.generate_leaves().await.unwrap();
+            let root = generate_data_root(chunks.clone()).unwrap();
+            let data_root = Base64(root.id.as_slice().to_vec());
+            let mut proofs = resolve_proofs(root, None).unwrap();
+
+            // Discard the last chunk & proof if it's zero length.
+            let last_chunk = chunks.last().unwrap();
+            if last_chunk.max_byte_range == last_chunk.min_byte_range {
+                chunks.pop();
+                proofs.pop();
+            }
+            self.chunks = Some(TransactionChunks {
+                chunks,
+                proofs,
+                data_root,
+                data_size: self.length,
+            });
+        }
+        Ok(self.chunks.clone().unwrap())
+    }
+
+    async fn generate_leaves(&self) -> Result<Vec<Node>, Error> {
+        let chunks = Chunks::new(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE, self.length);
+
+        let mut leaves = Vec::<Node>::new();
+        let mut buf = Vec::with_capacity(MAX_CHUNK_SIZE);
+        let mut binary_stream = self.inner.stream();
+        for chunk in chunks {
+            if chunk.1 > chunk.0 {
+                if buf.len() >= chunk.1 - chunk.0 {
+                    break;
+                }
+                while let Some(item) = binary_stream.next().await {
+                    match item {
+                        Ok(d) => {
+                            buf.extend(d);
+                            if buf.len() >= chunk.1 - chunk.0 {
+                                break;
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            let data_hash = (&buf[0..(chunk.1 - chunk.0)]).sha256();
+            if buf.len() > chunk.1 - chunk.0 {
+                buf = buf[(chunk.1 - chunk.0)..].to_vec();
+            } else {
+                buf.clear();
+            }
+            let offset = chunk.1.to_note_vec();
+            let id = (vec![data_hash.as_slice(), &offset]).sha256();
+
+            leaves.push(Node {
+                id,
+                data_hash: Some(data_hash),
+                min_byte_range: chunk.0,
+                max_byte_range: chunk.1,
+                left_child: None,
+                right_child: None,
+            });
+        }
+        Ok(leaves)
+    }
+
+    pub fn iterator(&mut self) -> impl Stream<Item = Result<Chunk, Error>> + '_ {
+        try_stream! {
+            if self.chunks.is_none() {
+                self.hash().await?;
+            }
+            let chunks = self.chunks.clone().unwrap();
+            let mut buf = Vec::with_capacity(MAX_CHUNK_SIZE);
+            let mut binary_stream = self.inner.stream();
+
+            for (i, item) in chunks.proofs.iter().enumerate() {
+                let chunk = chunks.chunks.get(i);
+                let proof = chunks.proofs.get(i);
+                if chunk.is_none() || proof.is_none() {
+                    return
+                }
+                let chunk = chunk.unwrap();
+                let proof = proof.unwrap();
+                assert!(chunk.max_byte_range > chunk.min_byte_range);
+                let chunk_size = chunk.max_byte_range - chunk.min_byte_range;
+                if buf.len() >= chunk_size {
+                    break;
+                }
+                while let Some(item) = binary_stream.next().await {
+                    let item = item.unwrap();
+                    buf.extend(item);
+                    if buf.len() >= chunk_size {
+                        break;
+                    }
+                }
+
+                let mut chnunk_buf = vec![0u8; chunk_size];
+                chnunk_buf.copy_from_slice(&buf[0..chunk_size]);
+                yield Chunk {
+                    data_root: chunks.data_root.clone(),
+                    data_size: chunks.data_size as u64,
+                    data_path: Base64(proof.proof.clone()),
+                    offset: proof.offset,
+                    chunk: Base64(chnunk_buf)
+                };
+                if buf.len() > chunk_size {
+                    buf = buf[(chunk_size)..].to_vec();
+                } else {
+                    buf.clear();
+                }
+            }
+        }
     }
 }
 
@@ -256,12 +363,12 @@ impl TryFrom<&str> for Transaction<Base64> {
 mod tests {
     use std::{fs::File, io::Read, str::FromStr};
 
+    use crate::error::Error;
     use crate::{
         crypto::base64::Base64,
         currency::Currency,
         transaction::{tags::Tag, transaction::Transaction},
     };
-    use crate::error::Error;
 
     #[test]
     pub fn should_parse_correctly() {
@@ -269,7 +376,7 @@ mod tests {
         let mut data = String::new();
         file.read_to_string(&mut data).unwrap();
 
-        let actual_tx: Transaction<Base64> = data.as_str().try_into().unwrap();
+        let actual_tx: Transaction = data.as_str().try_into().unwrap();
         let expected_tx = Transaction {
             format: 2,
             id: Base64::from_str("7DjRLlYLAQOwcblMLX5hXW8WiZdvFDmxu_fNToLjYP0").unwrap(),
@@ -294,12 +401,9 @@ mod tests {
             quantity: Currency::from(0),
             data_root: Base64::from_str("UhOCNNZ6QteHG4nCDbFMDpbYWIo1FmEhU9nLw4M8KB0").unwrap(),
             data: Base64(vec![]),
-            data_reader: Base64(vec![]),
             data_size: 60589,
             reward: 212017846,
             signature: Base64::from_str("UJvcZhVoS_vRlETe8mEL-yq_qb_76dzBVmD2-mPUPAnWyC--2U85C1gpVD3-PTYQZq-aZpMmIJp4nFAjEsxssCwcIlCboC5EEG14T520g_9blmdB0u9Jj_4AVMB858K_KRL7Dh_GRudgSDOPY_2d9KjjIJTSm_4TeJk9ZoifsOn0OAMny71mUSNWtEjcTozSlKEMn6xqlsuXGAMVswlTaqy_MWbFllUkhpQdYg7lI2MdppMt-I30cVed4opxDRMHmFhA31FjpOmqkRbB1E7h8xK_t7XEZ2lSCjVH_stlPjgmKgh83Wm87f0qgkOp_N-oZrExX7yMkjzPUguxsG06zVzvNdA3OM2sIkAJuTbCmX0BeVUliYPaEWiny_cOQYbyKCiW8Mla2_ut77b-nKvR2Llu32HCLjh8hpx7GuPKQzOmBgfBLvLApu_ob-ytOnxWBaod9iqHk_hkGFUdyg_eb7w7RumijCAa2azVvor1IUizJFZ-9Cp6GkKCdCeQsTjiaS0wpPoh4MQ18HSey8lfqio_QrH_L6ARIeWh0aOzZ_R4ciYBK0YNqawMygTnktYZo4T6rzkB6FHR5hEwcqA2LtBc5Q6ktaZi0dyiUsE_zMALyM7toUAg3njorgYCQfQqj_79oPetgMz_cBQvHkHdpSqM2EdMxONz-aIpzq5iboA").unwrap(),
-            chunks: vec![],
-            proofs: vec![]
         };
 
         assert_eq!(actual_tx, expected_tx);
@@ -307,7 +411,6 @@ mod tests {
 
     #[test]
     pub fn should_verify_correctly() {
-
         let mut tx = Transaction {
             format: 2,
             id: Base64::from_str("7DjRLlYLAQOwcblMLX5hXW8WiZdvFDmxu_fNToLjYP0").unwrap(),
@@ -332,19 +435,12 @@ mod tests {
             quantity: Currency::from(0),
             data_root: Base64::from_str("UhOCNNZ6QteHG4nCDbFMDpbYWIo1FmEhU9nLw4M8KB0").unwrap(),
             data: Base64(vec![]),
-            data_reader: Base64(vec![]),
             data_size: 60589,
             reward: 212017846,
             signature: Base64::from_str("UJvcZhVoS_vRlETe8mEL-yq_qb_76dzBVmD2-mPUPAnWyC--2U85C1gpVD3-PTYQZq-aZpMmIJp4nFAjEsxssCwcIlCboC5EEG14T520g_9blmdB0u9Jj_4AVMB858K_KRL7Dh_GRudgSDOPY_2d9KjjIJTSm_4TeJk9ZoifsOn0OAMny71mUSNWtEjcTozSlKEMn6xqlsuXGAMVswlTaqy_MWbFllUkhpQdYg7lI2MdppMt-I30cVed4opxDRMHmFhA31FjpOmqkRbB1E7h8xK_t7XEZ2lSCjVH_stlPjgmKgh83Wm87f0qgkOp_N-oZrExX7yMkjzPUguxsG06zVzvNdA3OM2sIkAJuTbCmX0BeVUliYPaEWiny_cOQYbyKCiW8Mla2_ut77b-nKvR2Llu32HCLjh8hpx7GuPKQzOmBgfBLvLApu_ob-ytOnxWBaod9iqHk_hkGFUdyg_eb7w7RumijCAa2azVvor1IUizJFZ-9Cp6GkKCdCeQsTjiaS0wpPoh4MQ18HSey8lfqio_QrH_L6ARIeWh0aOzZ_R4ciYBK0YNqawMygTnktYZo4T6rzkB6FHR5hEwcqA2LtBc5Q6ktaZi0dyiUsE_zMALyM7toUAg3njorgYCQfQqj_79oPetgMz_cBQvHkHdpSqM2EdMxONz-aIpzq5iboA").unwrap(),
-            chunks: vec![],
-            proofs: vec![]
         };
 
-        let v = tx.verify().map_err(|_| {
-            Error::InvalidSignature
-        });
+        let v = tx.verify().map_err(|_| Error::InvalidSignature);
         assert!(v.is_ok());
-
     }
 }
-

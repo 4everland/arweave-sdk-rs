@@ -1,16 +1,41 @@
-use std::io::Read;
-use std::ops::DerefMut;
-use std::str::FromStr;
-use crate::bundle::tags::Tags;
 use crate::bundle::converter::ByteArrayConverter;
 use crate::bundle::sign::BundleSigner;
-use crate::crypto::hash::{deep_hash, deep_hash_reader, DeepHashItem, Hasher, ToItems};
-use crate::error::Error;
+use crate::bundle::tags::Tags;
 use crate::crypto::base64::Base64;
-use crate::crypto::reader::TransactionReader;
+use crate::crypto::hash::{deep_hash, DeepHashItem, Hasher, ToItems};
 use crate::crypto::sign::Signer;
+use crate::error::Error;
+use async_stream::try_stream;
+use bitcoin::hex::DisplayHex;
+use futures::StreamExt;
+use futures_core::Stream;
+use sha2::Digest;
+use sha2::Sha384;
+use std::io::Read;
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::str::FromStr;
+use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
-pub struct BundleItem<T: Signer + BundleSigner> {
+pub trait BundleStreamFactory {
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>>;
+    fn length(&self) -> Result<usize, Error>;
+    fn is_empty(&self) -> bool {
+        self.length().unwrap() > 0
+    }
+}
+impl BundleStreamFactory for Vec<u8> {
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>> {
+        Box::pin(try_stream! {
+            yield self.clone();
+        })
+    }
+
+    fn length(&self) -> Result<usize, Error> {
+        Ok(self.len())
+    }
+}
+pub struct BundleItem<T, R> {
     pub signature_type: u8,
     pub signature: Base64,
     pub owner: Base64,
@@ -18,8 +43,9 @@ pub struct BundleItem<T: Signer + BundleSigner> {
     pub anchor: Base64,
     pub tags: Tags,
     pub id: Base64,
-    item: Box<dyn TransactionReader>,
+    item: R,
     signer: T,
+    length: usize,
 }
 
 pub struct DataItemCreateOptions {
@@ -28,9 +54,14 @@ pub struct DataItemCreateOptions {
     pub tags: Tags,
 }
 
-impl<T: Signer + BundleSigner> BundleItem<T> {
-    pub fn new<R: TransactionReader + 'static>(s: T, r: Box<R>, o: DataItemCreateOptions) -> BundleItem<T> {
-        return BundleItem {
+impl<T, R> BundleItem<T, R>
+where
+    T: Signer + BundleSigner,
+    R: BundleStreamFactory,
+{
+    pub fn new(s: T, r: R, o: DataItemCreateOptions) -> Result<BundleItem<T, R>, Error> {
+        let l = r.length().unwrap();
+        return Ok(BundleItem {
             signature_type: s.signature_type(),
             signature: Default::default(),
             owner: s.public_key().unwrap(),
@@ -40,18 +71,21 @@ impl<T: Signer + BundleSigner> BundleItem<T> {
             id: Default::default(),
             item: r,
             signer: s,
-        };
+            length: l,
+        });
     }
 
     async fn signature(&mut self) -> Result<(), Error> {
         let h = deep_hash(self.to_deep_hash_item().await.unwrap());
-        let signature = self.signer.sign(h.as_slice()).map_err(|e| Error::SigningError(e.to_string()))?;
+        let signature = self
+            .signer
+            .sign(h.as_slice())
+            .map_err(|e| Error::SigningError(e.to_string()))?;
 
         self.signature = Base64::from(signature.as_slice());
         self.id = Base64::from(signature.as_slice().sha256().as_slice());
         Ok(())
     }
-
 
     async fn to_deep_hash_item(&mut self) -> Result<DeepHashItem, Error> {
         let mut data: Vec<DeepHashItem> = vec![
@@ -62,111 +96,90 @@ impl<T: Signer + BundleSigner> BundleItem<T> {
             self.target.clone(),
             self.anchor.clone(),
             Base64::from(&self.tags),
-        ].into_iter().map(|op| DeepHashItem::from_item(&op.0)).collect();
-        data.push(DeepHashItem::Origin(deep_hash_reader(self.item.deref_mut()).await));
+        ]
+        .into_iter()
+        .map(|op| DeepHashItem::from_item(&op.0))
+        .collect();
+        data.push(DeepHashItem::Origin(self.item_hash().await.unwrap()));
         Ok(DeepHashItem::from_children(data))
     }
 
+    async fn item_hash(&mut self) -> Result<[u8; 48], Error> {
+        let blob_tag = format!("blob{}", self.length);
+
+        let mut context = Sha384::new();
+        let mut stream = self.item.stream();
+        while let Some(readed) = stream.next().await {
+            context.update(&readed.unwrap()[..]);
+        }
+        let result = context.finalize();
+        Ok([&blob_tag.as_bytes().sha384(), &result[..]]
+            .concat()
+            .as_slice()
+            .sha384())
+    }
 
     //todo
-    pub async fn binary_length(&mut self) -> Result<usize, Error> {
+    pub fn binary_length(&self) -> Result<usize, Error> {
         let _owner = self.signer.public_key().unwrap();
-        let data_length = self.item.length().await.unwrap();
+        let data_length = self.length;
 
         Ok(2 + self.signature.0.len()
             + _owner.0.len()
-            + 1 + self.target.0.len()
-            + 1 + self.anchor.0.len()
-            + 16 + Base64::from(&self.tags).0.len()
+            + 1
+            + self.target.0.len()
+            + 1
+            + self.anchor.0.len()
+            + 16
+            + Base64::from(&self.tags).0.len()
             + data_length)
     }
 
-    pub async fn get_binary(&mut self) -> Result<Vec<u8>, Error> {
-        self.item.read_all().await
-    }
+    pub fn binary_stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>> {
+        Box::pin(try_stream! {
+            let _owner = self.signer.public_key().unwrap();
 
 
-    //todo error
-    async fn create(&mut self) -> Result<Vec<u8>, Error> {
-        let _owner = self.signer.public_key().unwrap();
+            yield ByteArrayConverter::short_to_2_byte_array(
+                self.signature_type as u64,
+            );
+            yield self.signature.0.clone();
+            // if _owner.len() != signer.owner_length() {
+            //     // return "Owner must be {} bytes, but was incorrectly {}", signer.owner_length(),  _owner.len()
+            // }
+            yield _owner.0.clone();
 
-        let target_length = 1 + self.target.0.len();
-        let anchor_length = 1 + self.anchor.0.len();
-
-        let tags_length = 16 + Base64::from(&self.tags).0.len();
-
-        let data_length = self.item.length().await.unwrap();
-
-        let length = 2
-            + self.signature.0.len()
-            + _owner.0.len()
-            + target_length
-            + anchor_length
-            + tags_length
-            + data_length;
-        let mut bytes = vec![0; length];
-
-        bytes[0..2].copy_from_slice(&ByteArrayConverter::short_to_2_byte_array(self.signature_type as u64));
-        bytes[2..(2 + self.signature.0.len())].copy_from_slice(&self.signature.0);
-        // if _owner.len() != signer.owner_length() {
-        //     // return "Owner must be {} bytes, but was incorrectly {}", signer.owner_length(),  _owner.len()
-        // }
-        bytes[(2 + self.signature.0.len())..(2 + self.signature.0.len() + _owner.0.len())]
-            .copy_from_slice(_owner.0.as_slice());
-
-        let position = 2 + self.signature.0.len() + _owner.0.len();
-        bytes[position] = !self.target.is_empty() as u8;
-        if !self.target.is_empty() {
-            if self.target.0.len() != 32 {
-                // return Err()//Target must be 32 bytes;
+            //let position = 2 + self.signature.0.len() + _owner.0.len();
+            //bytes[position] = !self.target.is_empty() as u8;
+            yield [self.target.is_empty() as u8].to_vec();
+            if !self.target.is_empty() {
+                if self.target.0.len() != 32 {
+                    // return Err()//Target must be 32 bytes;
+                }
+                yield self.target.0.clone();
             }
-            bytes[(position + 1)..(position + 33)].copy_from_slice(&self.target.0);
-        }
-
-        let anchor_start = position + target_length;
-        let mut tags_start = anchor_start + 1;
-        bytes[anchor_start] = !self.anchor.is_empty() as u8;
-        if !self.anchor.is_empty() {
-            tags_start += self.anchor.0.len();
-            if self.anchor.0.len() != 32 {
-                // return Err()//Anchor must be 32 bytes
+            yield [self.anchor.is_empty() as u8].to_vec();
+            if !self.anchor.is_empty() {
+                if self.anchor.0.len() != 32 {
+                    // return Err()//Anchor must be 32 bytes
+                }
+                yield self.anchor.0.clone();
             }
-            bytes[(anchor_start + 1)..(anchor_start + 33)].copy_from_slice(&self.anchor.0);
-        }
 
-        bytes[tags_start..(tags_start + 8)].copy_from_slice(
-            &ByteArrayConverter::long_to_8_byte_array(self.tags.tags.len() as u64),
-        );
+            yield ByteArrayConverter::long_to_8_byte_array(self.tags.tags.len() as u64);
 
-        let tags = Base64::from(&self.tags).0;
-        bytes[tags_start + 8..(tags_start + 16)].copy_from_slice(
-            &ByteArrayConverter::long_to_8_byte_array(tags.len() as u64),
-        );
-        if !self.tags.tags.is_empty() {
-            bytes[(tags_start + 16)..(tags_start + tags_length)].copy_from_slice(&tags);
-        }
-
-        let data_start = tags_start + tags_length;
-        bytes[data_start..].copy_from_slice((&self.item.chunk_read(0, data_length).await.unwrap()).as_ref());
-        Ok(bytes)
+            let tags = Base64::from(&self.tags).0;
+            yield ByteArrayConverter::long_to_8_byte_array(tags.len() as u64);
+            if !self.tags.tags.is_empty() {
+                yield tags;
+            }
+            let mut stream = self.item.stream();
+            while let Some(readed) = stream.next().await {
+                yield readed.unwrap().to_vec();
+            }
+        })
     }
 }
-
-// impl<'a, T> ToItems<'a, BundleItem<T>> for BundleItem<T> where T: Signer {
-//     async fn to_deep_hash_item(&'a self) -> Result<DeepHashItem, Error> {
-//         let mut data: Vec<DeepHashItem> = vec![
-//             Base64::from_utf8_str("dataitem").unwrap(),
-//             Base64::from_utf8_str("1").unwrap(),
-//             Base64::from_utf8_str(self.signature_type.to_string().as_str()).unwrap(),
-//             self.owner.clone(),
-//             self.target.clone(),
-//             self.anchor.clone(),
-//             Base64::from(&self.tags),
-//         ].into_iter().map(|op| DeepHashItem::from_item(&op.0)).collect();
-//         data.push(DeepHashItem::Origin(deep_hash_reader(&self.item).await));
-//         Ok(DeepHashItem::List(data))
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -177,7 +190,8 @@ mod tests {
     use crate::crypto::base64::Base64;
     use crate::crypto::sign;
     use crate::crypto::sign::EthSigner;
-    use crate::types::{BundleTag};
+    use crate::types::BundleTag;
+    use futures::StreamExt;
 
     #[tokio::test]
     async fn test_bundle_item_create() {
@@ -200,17 +214,23 @@ mod tests {
             target: Base64::default(),
             anchor: Base64::default(),
             tags: Tags {
-                tags: vec![
-                    BundleTag { name: "Content-Type".to_string(), value: "application/txt".to_string() },
-                ]
+                tags: vec![BundleTag {
+                    name: "Content-Type".to_string(),
+                    value: "application/txt".to_string(),
+                }],
             },
+            //length: 0,
         };
 
-
-        let mut b = BundleItem::new(signer, Box::new("dd ee ff".as_bytes()), create_options);
+        let mut b =
+            BundleItem::new(signer, "dd ee ff".as_bytes().to_vec(), create_options).unwrap();
         b.signature().await.expect("TODO: panic message");
-        let meta = b.create();
-        let binary = Base64::from(meta.await.unwrap().as_slice());
+        let mut st = b.binary_stream();
+        let mut meta = vec![];
+        while let Some(r) = st.next().await {
+            meta.extend(r.unwrap())
+        }
+        let binary = Base64::from(meta.as_slice());
 
         println!("{:?}", b.signature.to_string());
         println!("{}", binary);
@@ -218,24 +238,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_bundle_item_create_2() {
-        let signer = EthSigner::from_prv_hex(&"0ba6e4ec4bfa6f02f2027eba34f0fe9f1cc915f14b42d490ebd99bbb90c466e1").unwrap();
+        let signer = EthSigner::from_prv_hex(
+            &"0ba6e4ec4bfa6f02f2027eba34f0fe9f1cc915f14b42d490ebd99bbb90c466e1",
+        )
+        .unwrap();
         let create_options = DataItemCreateOptions {
             target: Base64::default(),
             anchor: Base64::default(),
             tags: Tags {
                 tags: vec![
-                    BundleTag { name: "Content-Type".to_string(), value: "application/txt".to_string() },
-                    BundleTag { name: "App-Version".to_string(), value: "2.0.0".to_string() },
-                ]
+                    BundleTag {
+                        name: "Content-Type".to_string(),
+                        value: "application/txt".to_string(),
+                    },
+                    BundleTag {
+                        name: "App-Version".to_string(),
+                        value: "2.0.0".to_string(),
+                    },
+                ],
             },
         };
 
-
-        let mut b = BundleItem::new(signer, Box::new("aa bb cc".as_bytes()), create_options);
+        let mut b =
+            BundleItem::new(signer, "aa bb cc".as_bytes().to_vec(), create_options).unwrap();
         b.signature().await.expect("TODO: panic message");
-        let meta = b.create().await;
+        let mut st = b.binary_stream();
+        let mut meta = vec![];
+        while let Some(r) = st.next().await {
+            meta.extend(r.unwrap())
+        }
 
-        let binary = Base64::from(meta.unwrap().as_slice());
+        let binary = Base64::from(meta.as_slice());
         println!("{:?}", b.id.to_string());
         println!("{:?}", b.signature.to_string());
         println!("{}", binary);

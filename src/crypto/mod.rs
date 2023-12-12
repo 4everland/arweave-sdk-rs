@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::error::Error;
+use std::path::PathBuf;
 
 use self::{
     base64::Base64,
@@ -12,15 +12,14 @@ pub mod base64;
 pub mod hash;
 pub mod merkle;
 pub mod sign;
-pub mod reader;
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::str::FromStr;
-    use crate::error::Error;
     use crate::crypto::base64::Base64;
     use crate::crypto::sign::{ArweaveSigner, Signer};
+    use crate::error::Error;
+    use std::path::PathBuf;
+    use std::str::FromStr;
 
     const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
 
