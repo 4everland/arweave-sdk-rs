@@ -1,12 +1,12 @@
 use futures::StreamExt;
 
-use tokio::task;
 use tokio::sync::mpsc;
+use tokio::task;
 
-use crate::error::Error;
 use crate::bundle::bundle::Bundle;
 use crate::bundle::item::BundleStreamFactory;
 use crate::client::client::Client;
+use crate::error::Error;
 use crate::transaction::transaction::{Transaction, TransactionChunksFactory};
 
 pub struct Uploader {
@@ -15,20 +15,26 @@ pub struct Uploader {
 
 impl Default for Uploader {
     fn default() -> Self {
-        Self { client: Client::default() }
+        Self {
+            client: Client::default(),
+        }
     }
 }
 
 #[allow(dead_code)]
-impl Uploader
-{
+impl Uploader {
     pub fn new(client: Client) -> Self {
         Uploader { client }
     }
 
-    pub async fn submit<R>(&self, transaction: Transaction, mut chunks_creator: TransactionChunksFactory<Bundle<R>>, concurrent_limit: usize) -> Result<(), Error>
-        where
-            R: BundleStreamFactory
+    pub async fn submit<R>(
+        &self,
+        transaction: Transaction,
+        mut chunks_creator: TransactionChunksFactory<Bundle<R>>,
+        concurrent_limit: usize,
+    ) -> Result<(), Error>
+    where
+        R: BundleStreamFactory,
     {
         self.client.submit_transaction(transaction).await?;
 
@@ -40,10 +46,8 @@ impl Uploader
             let v = value.unwrap();
             sc += 1;
             let t = tx.clone();
-            let c  = self.client.clone();
-            task::spawn(async move {
-                t.send(c.upload_chunk(&v).await).await.unwrap()
-            });
+            let c = self.client.clone();
+            task::spawn(async move { t.send(c.upload_chunk(&v).await).await.unwrap() });
             if sc == concurrent_limit {
                 break;
             }
@@ -56,16 +60,14 @@ impl Uploader
                 sc += 1;
                 let v = value.unwrap();
                 let t = tx.clone();
-                let c  = self.client.clone();
-                task::spawn(async move {
-                    t.send(c.upload_chunk(&v).await).await.unwrap()
-                });
+                let c = self.client.clone();
+                task::spawn(async move { t.send(c.upload_chunk(&v).await).await.unwrap() });
             }
 
             if sc == rc {
-                break
+                break;
             }
-        };
+        }
 
         Ok(())
     }

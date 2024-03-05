@@ -1,8 +1,13 @@
+use crate::crypto::base64::Base64;
+use crate::types::BundleTag as Tag;
+use apache_avro::{
+    from_avro_datum, from_value, to_avro_datum, to_value,
+    types::Value,
+    types::Value::{Array, Bytes, Record},
+    Schema,
+};
 use lazy_static::lazy_static;
-use serde::{Deserialize, Serialize, Serializer, Deserializer, ser::Error};
-use apache_avro::{Schema, from_avro_datum, types::Value, types::Value::{Array, Bytes, Record}, from_value, to_value, to_avro_datum};
-use crate::crypto::{base64::Base64};
-use crate::types::{BundleTag as Tag};
+use serde::{ser::Error, Deserialize, Deserializer, Serialize, Serializer};
 
 const SCHEMA_STR: &str = r#"{"type": "array", "items": {"type": "record", "name": "Tag", "fields": [{"name": "name", "type": "string"}, {"name": "value", "type": "string"}]}}"#;
 
@@ -30,35 +35,43 @@ impl From<&Tags> for Base64 {
     fn from(value: &Tags) -> Self {
         match to_value(value) {
             Ok(Bytes(v)) => Base64::from(v.as_slice()),
-            _ => Base64::empty()
+            _ => Base64::empty(),
         }
     }
 }
 
 impl Serialize for Tags {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
         if self.tags.is_empty() {
             return serializer.serialize_none();
         }
 
-        let values = Array(self.tags.iter().map(|t| Record(vec![
-            ("name".to_owned(), Value::String(t.name.clone())),
-            ("value".to_owned(), Value::String(t.value.clone())),
-        ])).collect());
+        let values = Array(
+            self.tags
+                .iter()
+                .map(|t| {
+                    Record(vec![
+                        ("name".to_owned(), Value::String(t.name.clone())),
+                        ("value".to_owned(), Value::String(t.value.clone())),
+                    ])
+                })
+                .collect(),
+        );
 
         let serialized_tags = to_avro_datum(&*SCHEMA, values).map_err(Error::custom)?;
-        serializer.serialize_bytes(serialized_tags.clone().as_slice()).map_err(Error::custom)
+        serializer
+            .serialize_bytes(serialized_tags.clone().as_slice())
+            .map_err(Error::custom)
     }
 }
 
-
 impl<'de> Deserialize<'de> for Tags {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
+    where
+        D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
         struct TagsVisitor;
@@ -70,8 +83,12 @@ impl<'de> Deserialize<'de> for Tags {
                 formatter.write_str("deserialize bundle tags error")
             }
 
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E> where E: serde::de::Error {
-                let decoded_datum = from_avro_datum(&*SCHEMA, &mut Box::new(v), Some(&*SCHEMA)).map_err(serde::de::Error::custom)?;
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let decoded_datum = from_avro_datum(&*SCHEMA, &mut Box::new(v), Some(&*SCHEMA))
+                    .map_err(serde::de::Error::custom)?;
                 match decoded_datum {
                     Array(values) => {
                         let mut tags = Vec::new();
@@ -82,13 +99,14 @@ impl<'de> Deserialize<'de> for Tags {
 
                         Ok(Self::Value { tags })
                     }
-                    _ => {
-                        Err(serde::de::Error::custom("wrong tag type"))
-                    }
+                    _ => Err(serde::de::Error::custom("wrong tag type")),
                 }
             }
 
-            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E> where E: serde::de::Error {
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
                 self.visit_bytes(v.as_slice())
             }
         }
@@ -99,8 +117,8 @@ impl<'de> Deserialize<'de> for Tags {
 #[cfg(test)]
 mod tests {
     use crate::bundle::tags::Tags;
-    use crate::types::{BundleTag as Tag};
-    use apache_avro::{to_value, from_value};
+    use crate::types::BundleTag as Tag;
+    use apache_avro::{from_value, to_value};
 
     fn setup() -> Tags {
         let tags = Tags {

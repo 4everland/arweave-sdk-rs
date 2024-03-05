@@ -12,7 +12,7 @@ use sha2::Sha384;
 use std::pin::Pin;
 
 pub trait BundleStreamFactory {
-    fn stream(&self) -> Pin<Box<dyn Stream<Item=Result<Vec<u8>, Error>> + '_>>;
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>>;
     fn length(&self) -> Result<usize, Error>;
     fn is_empty(&self) -> bool {
         self.length().unwrap() > 0
@@ -20,7 +20,7 @@ pub trait BundleStreamFactory {
 }
 
 impl BundleStreamFactory for Vec<u8> {
-    fn stream(&self) -> Pin<Box<dyn Stream<Item=Result<Vec<u8>, Error>> + '_>> {
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>> {
         Box::pin(try_stream! {
             yield self.clone();
         })
@@ -51,8 +51,8 @@ pub struct DataItemCreateOptions {
 }
 
 impl<R> BundleItem<R>
-    where
-        R: BundleStreamFactory
+where
+    R: BundleStreamFactory,
 {
     pub async fn new(r: R, o: DataItemCreateOptions) -> Result<BundleItem<R>, Error> {
         let l = r.length().unwrap();
@@ -71,10 +71,12 @@ impl<R> BundleItem<R>
 
         match o.signer {
             Some(signer) => {
-                item.signature(signer).await.map_err(|e| Error::SigningError(e.to_string()))?;
+                item.signature(signer)
+                    .await
+                    .map_err(|e| Error::SigningError(e.to_string()))?;
                 Ok(item)
             }
-            None => { Ok(item) }
+            None => Ok(item),
         }
     }
 
@@ -100,7 +102,10 @@ impl<R> BundleItem<R>
             self.target.clone(),
             self.anchor.clone(),
             Base64::from(&self.tags),
-        ].into_iter().map(|op| DeepHashItem::from_item(&op.0)).collect();
+        ]
+        .into_iter()
+        .map(|op| DeepHashItem::from_item(&op.0))
+        .collect();
         data.push(DeepHashItem::Origin(self.item_hash().await.unwrap()));
         Ok(DeepHashItem::from_children(data))
     }
@@ -134,7 +139,7 @@ impl<R> BundleItem<R>
             + data_length)
     }
 
-    pub fn binary_stream(&self) -> Pin<Box<dyn Stream<Item=Result<Vec<u8>, Error>> + '_>> {
+    pub fn binary_stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>> {
         Box::pin(try_stream! {
            if self.signature.is_empty() {
                Err(Error::SigningError("signature is empty".to_string()))?;
@@ -177,21 +182,20 @@ impl<R> BundleItem<R>
 mod tests {
     extern crate jsonwebkey as jwk;
 
-    use std::path::PathBuf;
     use crate::bundle::item::{BundleItem, DataItemCreateOptions};
+    use crate::bundle::sign::BundleSigner;
     use crate::bundle::tags::Tags;
     use crate::crypto::base64::Base64;
     use crate::crypto::sign;
     use crate::crypto::sign::{EthSigner, Signer};
     use crate::types::BundleTag;
     use futures::StreamExt;
-    use crate::bundle::sign::BundleSigner;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_bundle_item_create() {
-        let signer = sign::ArweaveSigner::from_keypair_path(
-            &"tests/fixtures/arweave_wallet.json"
-        ).unwrap();
+        let signer =
+            sign::ArweaveSigner::from_keypair_path(&"tests/fixtures/arweave_wallet.json").unwrap();
         let bundle_signer: Box<dyn BundleSigner> = Box::new(signer.clone());
         let create_options = DataItemCreateOptions {
             target: Base64::default(),
@@ -205,7 +209,9 @@ mod tests {
             signer: Some(bundle_signer),
         };
 
-        let item = BundleItem::new(PathBuf::from("tests/fixtures/1mb.bin"), create_options).await.unwrap();
+        let item = BundleItem::new(PathBuf::from("tests/fixtures/1mb.bin"), create_options)
+            .await
+            .unwrap();
 
         let mut stream = item.binary_stream();
         let mut b = vec![];
@@ -219,8 +225,11 @@ mod tests {
     #[tokio::test]
     async fn test_bundle_item_create_2() {
         let signer = EthSigner::from_prv_hex(
-            std::fs::read_to_string(PathBuf::from("tests/fixtures/secp256k1.hex")).unwrap().as_str()
-        ).unwrap();
+            std::fs::read_to_string(PathBuf::from("tests/fixtures/secp256k1.hex"))
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
         let s: Box<dyn BundleSigner> = Box::new(signer);
         let create_options = DataItemCreateOptions {
             target: Base64::default(),
@@ -240,9 +249,17 @@ mod tests {
             signer: None,
         };
 
-        let mut item = BundleItem::new(PathBuf::from("tests/fixtures/bundle_item_1"), create_options).await.unwrap();
+        let mut item = BundleItem::new(
+            PathBuf::from("tests/fixtures/bundle_item_1"),
+            create_options,
+        )
+        .await
+        .unwrap();
         item.signature(s).await.unwrap();
 
-        assert_eq!("NIfFknqcXO9zbfuh7xV3KnzvHTIuRAof104pEYR5iGQ", item.id.to_string());
+        assert_eq!(
+            "NIfFknqcXO9zbfuh7xV3KnzvHTIuRAof104pEYR5iGQ",
+            item.id.to_string()
+        );
     }
 }

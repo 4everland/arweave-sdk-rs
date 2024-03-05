@@ -1,11 +1,10 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use serde::{de, Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 use crate::consts::WINSTONS_PER_AR;
 use crate::error::Error;
-
+use serde::{de, Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 #[derive(Serialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Currency {

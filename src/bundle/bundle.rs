@@ -1,9 +1,6 @@
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::cmp::min;
-use tokio::fs::File;
 use crate::bundle::converter::ByteArrayConverter;
 use crate::bundle::item::{BundleItem, BundleStreamFactory};
+use crate::client::client::Client;
 use crate::crypto::base64::Base64;
 use crate::crypto::sign::Signer;
 use crate::error::Error;
@@ -12,18 +9,21 @@ use crate::transaction::transaction::{Transaction, TransactionChunksFactory};
 use async_stream::try_stream;
 use futures::StreamExt;
 use futures_core::Stream;
+use std::cmp::min;
+use std::path::PathBuf;
+use std::pin::Pin;
+use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use crate::client::client::Client;
 
 pub struct Bundle<R> {
     items: Vec<BundleItem<R>>,
 }
 
 impl<R> BundleStreamFactory for Bundle<R>
-    where
-        R: BundleStreamFactory,
+where
+    R: BundleStreamFactory,
 {
-    fn stream(&self) -> Pin<Box<dyn Stream<Item=Result<Vec<u8>, Error>> + '_>> {
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>> {
         let bundle_stream = try_stream! {
             yield ByteArrayConverter::long_to_32_byte_array(
                 self.items.len() as u64
@@ -57,11 +57,11 @@ impl<R> BundleStreamFactory for Bundle<R>
 }
 
 impl<R> Bundle<R>
-    where
-        R: BundleStreamFactory,
+where
+    R: BundleStreamFactory,
 {
     pub fn new(items: Vec<BundleItem<R>>) -> Bundle<R> {
-        return Bundle { items };
+        Bundle { items }
     }
 
     pub async fn to_transaction(
@@ -79,8 +79,10 @@ impl<R> Bundle<R>
                 name: Base64::from_utf8_str("Bundle-Version").unwrap(),
                 value: Base64::from_utf8_str("2.0.0").unwrap(),
             },
-
-        ].into_iter().chain(tags).collect();
+        ]
+        .into_iter()
+        .chain(tags)
+        .collect();
 
         let length = self.length().unwrap();
         let mut chunks_creator = TransactionChunksFactory::new(Box::new(self))?;
@@ -102,16 +104,16 @@ impl<R> Bundle<R>
 }
 
 impl BundleStreamFactory for PathBuf {
-    fn stream(&self) -> Pin<Box<dyn Stream<Item=Result<Vec<u8>, Error>> + '_>> {
+    fn stream(&self) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, Error>> + '_>> {
         Box::pin(try_stream! {
-                 let mut f = File::open(self).await?;
-            let mut length = self.length().unwrap();
-                while length > 0 {
-                    let mut buffer = vec![0; min(1024, length)];
-                    length -= f.read(&mut buffer).await?;
-                    yield buffer;
-                }
-            })
+             let mut f = File::open(self).await?;
+        let mut length = self.length().unwrap();
+            while length > 0 {
+                let mut buffer = vec![0; min(1024, length)];
+                length -= f.read(&mut buffer).await?;
+                yield buffer;
+            }
+        })
     }
 
     fn length(&self) -> Result<usize, Error> {

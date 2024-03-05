@@ -1,16 +1,14 @@
-use std::str::FromStr;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use base64::{Engine as _, engine::general_purpose};
 use crate::error::Error;
+use base64::{engine::general_purpose, Engine as _};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
-pub struct Base64(
-    pub Vec<u8>
-);
+pub struct Base64(pub Vec<u8>);
 
 impl std::fmt::Display for Base64 {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let string =  general_purpose::URL_SAFE_NO_PAD.encode(&self.0);
+        let string = general_purpose::URL_SAFE_NO_PAD.encode(&self.0);
         write!(f, "{}", string)
     }
 }
@@ -73,7 +71,8 @@ impl<'de> Deserialize<'de> for Base64 {
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                general_purpose::URL_SAFE_NO_PAD.decode(v)
+                general_purpose::URL_SAFE_NO_PAD
+                    .decode(v)
                     .map(Base64)
                     .map_err(|_| de::Error::custom("failed to decode base64 string"))
             }

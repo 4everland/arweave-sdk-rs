@@ -28,6 +28,8 @@ impl ByteArrayConverter {
     }
 
     pub fn byte_array_to_long(byte_array: &[u8]) -> u64 {
-        byte_array.iter().fold(0, |acc, &byte| (acc << 8) | byte as u64)
+        byte_array
+            .iter()
+            .fold(0, |acc, &byte| (acc << 8) | byte as u64)
     }
 }

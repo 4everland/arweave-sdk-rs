@@ -53,9 +53,9 @@ impl<'a> ToItems<'a, Transaction> for Transaction {
                     &reward,
                     &self.last_tx,
                 ]
-                    .into_iter()
-                    .map(|op| DeepHashItem::from_item(&op.0))
-                    .collect();
+                .into_iter()
+                .map(|op| DeepHashItem::from_item(&op.0))
+                .collect();
                 children.push(self.tags.to_deep_hash_item()?);
 
                 Ok(DeepHashItem::from_children(children))
@@ -69,9 +69,9 @@ impl<'a> ToItems<'a, Transaction> for Transaction {
                     self.reward.to_string().as_bytes(),
                     &self.last_tx.0,
                 ]
-                    .into_iter()
-                    .map(DeepHashItem::from_item)
-                    .collect();
+                .into_iter()
+                .map(DeepHashItem::from_item)
+                .collect();
                 children.push(self.tags.to_deep_hash_item().unwrap());
                 children.push(DeepHashItem::from_item(
                     self.data_size.to_string().as_bytes(),
@@ -218,8 +218,8 @@ impl TryFrom<&str> for Transaction {
 
 impl Serialize for Transaction {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
         let mut state = serializer.serialize_struct("Transaction", 12)?;
         state.serialize_field("format", &self.format)?;
@@ -253,8 +253,8 @@ pub struct TransactionChunksFactory<T: ?Sized> {
 }
 
 impl<T> TransactionChunksFactory<T>
-    where
-        T: BundleStreamFactory + ?Sized,
+where
+    T: BundleStreamFactory + ?Sized,
 {
     pub fn new(inner: Box<T>) -> Result<TransactionChunksFactory<T>, Error> {
         Ok(Self {
@@ -265,11 +265,11 @@ impl<T> TransactionChunksFactory<T>
     }
 
     pub async fn hash(&mut self) -> Result<TransactionChunks, Error> {
-                if self.chunks.is_none() {
-                    let mut chunks = self.generate_leaves().await.unwrap();
-                    let root = generate_data_root(chunks.clone()).unwrap();
-                    let data_root = Base64(root.id.as_slice().to_vec());
-                    let mut proofs = resolve_proofs(root, None).unwrap();
+        if self.chunks.is_none() {
+            let mut chunks = self.generate_leaves().await.unwrap();
+            let root = generate_data_root(chunks.clone()).unwrap();
+            let data_root = Base64(root.id.as_slice().to_vec());
+            let mut proofs = resolve_proofs(root, None).unwrap();
 
             // Discard the last chunk & proof if it's zero length.
             let last_chunk = chunks.last().unwrap();
@@ -330,7 +330,7 @@ impl<T> TransactionChunksFactory<T>
         Ok(leaves)
     }
 
-    pub fn iterator(&mut self) -> Pin<Box<dyn Stream<Item=Result<Chunk, Error>> + '_>> {
+    pub fn iterator(&mut self) -> Pin<Box<dyn Stream<Item = Result<Chunk, Error>> + '_>> {
         Box::pin(try_stream! {
             if self.chunks.is_none() {
                 self.hash().await?;

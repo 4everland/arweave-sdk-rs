@@ -81,4 +81,3 @@ impl From<&BaseTag> for Tag<Base64> {
         }
     }
 }
-
