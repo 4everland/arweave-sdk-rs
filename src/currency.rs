@@ -1,15 +1,13 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use serde::{de, Deserialize, Deserializer};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use crate::consts::WINSTONS_PER_AR;
-
 use crate::error::Error;
 
 
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Serialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Currency {
     arweave: u64, //integer
     winston: u64, //decimal

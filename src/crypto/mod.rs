@@ -1,13 +1,3 @@
-use crate::error::Error;
-use std::path::PathBuf;
-
-use self::{
-    base64::Base64,
-    hash::{deep_hash, DeepHashItem, Hasher},
-    sign::ArweaveSigner,
-    sign::Signer,
-};
-
 pub mod base64;
 pub mod hash;
 pub mod merkle;
@@ -18,15 +8,12 @@ mod tests {
     use crate::crypto::base64::Base64;
     use crate::crypto::sign::{ArweaveSigner, Signer};
     use crate::error::Error;
-    use std::path::PathBuf;
-    use std::str::FromStr;
 
     const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
 
     impl Default for ArweaveSigner {
         fn default() -> Self {
-            let path = PathBuf::from_str(DEFAULT_WALLET_PATH).unwrap();
-            Self::from_keypair_path(path).expect("Could not create signer")
+            Self::from_keypair_path(DEFAULT_WALLET_PATH).expect("Could not create signer")
         }
     }
     #[test]
@@ -43,7 +30,7 @@ mod tests {
         let s = ArweaveSigner::default();
         let signature = s.sign(&message.0)?;
 
-        let pubk = s.public_key().unwrap();
+        let _ = s.public_key().unwrap();
 
         assert!(s.verify(&message.0, &signature));
         Ok(())

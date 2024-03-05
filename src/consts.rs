@@ -1,5 +1,3 @@
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 pub const ARWEAVE_BASE_URL: &str = "https://arweave.net/";
 
 /// Block size used for pricing calculations = 256 KB
@@ -13,7 +11,7 @@ pub const MAX_TX_DATA: u64 = 10_000_000;
 pub const CHUNKS_BUFFER_FACTOR: usize = 20;
 
 /// Number of times to retry posting chunks if not successful.
-pub const CHUNKS_RETRIES: u16 = 10;
+pub const CHUNKS_RETRIES: u32 = 4;
 
 /// Number of seconds to wait between retying to post a failed chunk.
 pub const CHUNKS_RETRY_SLEEP: u64 = 1;

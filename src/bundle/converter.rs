@@ -1,4 +1,6 @@
 pub struct ByteArrayConverter;
+
+#[allow(dead_code)]
 impl ByteArrayConverter {
     pub fn long_to_n_byte_array(n: usize, mut long: u64) -> Vec<u8> {
         let mut byte_array: Vec<u8> = vec![0; n];

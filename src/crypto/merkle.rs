@@ -3,7 +3,6 @@ use super::hash::Hasher;
 use crate::error::Error;
 use borsh::BorshDeserialize;
 use borsh_derive::BorshDeserialize;
-use tokio::io::AsyncReadExt;
 
 /// Single struct used for original data chunks (Leaves) and branch nodes (hashes of pairs of child nodes).
 #[derive(Debug, PartialEq, Clone)]
@@ -165,7 +164,10 @@ impl Chunks {
 impl Iterator for Chunks {
     type Item = (usize, usize);
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.pop()
+        match self.0.len() {
+            0 => None,
+            _ => Some(self.0.remove(0)),
+        }
     }
 }
 
@@ -355,7 +357,7 @@ mod tests {
         Ok(())
     }
 
-    // #[tokio::test]
+    // #[tokio::tests]
     // async fn test_generate_reader_leaves() -> Result<(), Error> {
     //     let mut r = fs::File::open(ONE_MB_BIN).await.unwrap();
     //     let leaves: Vec<Node> = generate_reader_leaves(&mut r).await.unwrap();

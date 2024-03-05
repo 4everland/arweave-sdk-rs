@@ -8,14 +8,14 @@ edition = "2021"
 [dependencies]
 sha2 = "0.10.8"
 rand = "0.8.5"
-base64 = "0.21.5"
-borsh = "1.2.0"
-serde = { version = "1.0.193", features = ["derive"]}
-tokio = { version = "1.34.0", features = ["full"]}
-serde_json = { version = "1.0.108", features = [] }
-borsh-derive = "1.2.0"
-url = "2.4.1"
-thiserror = "1.0.50"
+base64 = "0.22.0"
+borsh = "1.3.1"
+serde = { version = "1.0.197", features = ["derive"]}
+tokio = { version = "1.36.0", features = ["full"]}
+serde_json = { version = "1.0.114", features = [] }
+borsh-derive = "1.3.1"
+url = "2.5.0"
+thiserror = "1.0.57"
 infer = "0.15.0"
 serde-aux = "4.2.0"
 boring = "4.1.0"
@@ -23,17 +23,17 @@ jsonwebkey = { version = "0.3.5",  features = [ "pkcs-convert" ]}
 apache-avro = "0.16.0"
 lazy_static = { version = "1.4.0", features = [] }
 bytes = "1.5.0"
-async-trait = "0.1.74"
-reqwest = { version = "0.11.22", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1.77"
+reqwest = { version = "0.11.24", default-features = false, features = ["default-tls", "json"] }
 bip32 =  { version = "0.5.1", features = ["bip39", "mnemonic"] }
-k256 = "0.13.2"
-bitcoin = "0.31.0"
+k256 = "0.13.3"
+bitcoin = "0.31.1"
 bip39 = "2.0.0"
 ethaddr = "0.2.2"
 hex = "0.4.3"
 sha3 = "0.10.8"
 libsecp256k1 = "0.7.1"
 async-stream = "0.3.5"
-futures = "0.3.29"
-futures-core = "0.3.29"
-
+futures = "0.3.30"
+futures-core = "0.3.30"
+backoff= { version = "0.4.0", features = ["tokio"] }

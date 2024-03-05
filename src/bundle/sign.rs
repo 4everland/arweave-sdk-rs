@@ -10,6 +10,7 @@ const ARWEAVE_SIGN_CONFIG: (u8, SignatureMeta) = (1, SignatureMeta {
     pub_length: 512,
 });
 
+#[allow(dead_code)]
 const ED25519_SIGN_CONFIG: (u8, SignatureMeta) = (2, SignatureMeta {
     sig_length: 64,
     pub_length: 32,
@@ -20,13 +21,13 @@ const ETHEREUM_SIGN_CONFIG: (u8, SignatureMeta) = (3, SignatureMeta {
     pub_length: 65,
 });
 
+#[allow(dead_code)]
 const SOLANA_SIGN_CONFIG: (u8, SignatureMeta) = (4, SignatureMeta {
     sig_length: 64,
     pub_length: 32,
 });
 
-
-pub trait BundleSigner {
+pub trait BundleSigner: Signer {
     fn signature_type(&self) -> u8;
     fn signature_meta(&self) -> SignatureMeta;
 }

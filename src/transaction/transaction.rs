@@ -1,10 +1,8 @@
 use async_stream::try_stream;
 use futures::StreamExt;
-use serde::de::Visitor;
-use serde::Deserialize;
-use std::future::Future;
+use serde::{Deserialize, Serialize, Serializer};
+use std::pin::Pin;
 use std::str::FromStr;
-use tokio::io::AsyncReadExt;
 
 use crate::bundle::item::BundleStreamFactory;
 use crate::crypto::merkle::{Chunks, Helpers, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE};
@@ -23,6 +21,7 @@ use crate::{
     types::{Chunk, Transaction as JsonTransaction},
 };
 use futures_core::Stream;
+use serde::ser::SerializeStruct;
 
 #[derive(Deserialize, Debug, Default, PartialEq)]
 pub struct Transaction {
@@ -54,9 +53,9 @@ impl<'a> ToItems<'a, Transaction> for Transaction {
                     &reward,
                     &self.last_tx,
                 ]
-                .into_iter()
-                .map(|op| DeepHashItem::from_item(&op.0))
-                .collect();
+                    .into_iter()
+                    .map(|op| DeepHashItem::from_item(&op.0))
+                    .collect();
                 children.push(self.tags.to_deep_hash_item()?);
 
                 Ok(DeepHashItem::from_children(children))
@@ -70,9 +69,9 @@ impl<'a> ToItems<'a, Transaction> for Transaction {
                     self.reward.to_string().as_bytes(),
                     &self.last_tx.0,
                 ]
-                .into_iter()
-                .map(DeepHashItem::from_item)
-                .collect();
+                    .into_iter()
+                    .map(DeepHashItem::from_item)
+                    .collect();
                 children.push(self.tags.to_deep_hash_item().unwrap());
                 children.push(DeepHashItem::from_item(
                     self.data_size.to_string().as_bytes(),
@@ -85,6 +84,8 @@ impl<'a> ToItems<'a, Transaction> for Transaction {
         }
     }
 }
+
+#[allow(dead_code)]
 impl Transaction {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -94,7 +95,7 @@ impl Transaction {
         quantity: u128,
         fee: u64,
         last_tx: Base64,
-        other_tags: Vec<Tag<Base64>>,
+        tags: Vec<Tag<Base64>>,
     ) -> Result<Self, Error> {
         if quantity.lt(&0) {
             return Err(Error::InvalidValueForTx);
@@ -116,8 +117,6 @@ impl Transaction {
         };
         transaction.owner = crypto.public_key()?;
 
-        let mut tags = vec![];
-        tags.extend(other_tags);
         transaction.tags = tags;
 
         //todo... Fetch and set last_tx if not provided (primarily for testing).
@@ -216,6 +215,29 @@ impl TryFrom<&str> for Transaction {
         Transaction::try_from(json_tx)
     }
 }
+
+impl Serialize for Transaction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Transaction", 12)?;
+        state.serialize_field("format", &self.format)?;
+        state.serialize_field("id", &self.id.to_string())?;
+        state.serialize_field("last_tx", &self.last_tx.to_string())?;
+        state.serialize_field("owner", &self.owner.to_string())?;
+        state.serialize_field("tags", &self.tags)?;
+        state.serialize_field("target", &self.target.to_string())?;
+        state.serialize_field("quantity", &self.quantity.to_string())?;
+        state.serialize_field("data_root", &self.data_root.to_string())?;
+        state.serialize_field("data", &self.data.to_string())?;
+        state.serialize_field("data_size", &self.data_size.to_string())?;
+        state.serialize_field("reward", &self.reward.to_string())?;
+        state.serialize_field("signature", &self.signature.to_string())?;
+        state.end()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TransactionChunks {
     chunks: Vec<Node>,
@@ -231,8 +253,8 @@ pub struct TransactionChunksFactory<T: ?Sized> {
 }
 
 impl<T> TransactionChunksFactory<T>
-where
-    T: BundleStreamFactory + ?Sized,
+    where
+        T: BundleStreamFactory + ?Sized,
 {
     pub fn new(inner: Box<T>) -> Result<TransactionChunksFactory<T>, Error> {
         Ok(Self {
@@ -243,11 +265,11 @@ where
     }
 
     pub async fn hash(&mut self) -> Result<TransactionChunks, Error> {
-        if self.chunks.is_none() {
-            let mut chunks = self.generate_leaves().await.unwrap();
-            let root = generate_data_root(chunks.clone()).unwrap();
-            let data_root = Base64(root.id.as_slice().to_vec());
-            let mut proofs = resolve_proofs(root, None).unwrap();
+                if self.chunks.is_none() {
+                    let mut chunks = self.generate_leaves().await.unwrap();
+                    let root = generate_data_root(chunks.clone()).unwrap();
+                    let data_root = Base64(root.id.as_slice().to_vec());
+                    let mut proofs = resolve_proofs(root, None).unwrap();
 
             // Discard the last chunk & proof if it's zero length.
             let last_chunk = chunks.last().unwrap();
@@ -272,10 +294,7 @@ where
         let mut buf = Vec::with_capacity(MAX_CHUNK_SIZE);
         let mut binary_stream = self.inner.stream();
         for chunk in chunks {
-            if chunk.1 > chunk.0 {
-                if buf.len() >= chunk.1 - chunk.0 {
-                    break;
-                }
+            if buf.len() < chunk.1 - chunk.0 {
                 while let Some(item) = binary_stream.next().await {
                     match item {
                         Ok(d) => {
@@ -291,7 +310,8 @@ where
 
             let data_hash = (&buf[0..(chunk.1 - chunk.0)]).sha256();
             if buf.len() > chunk.1 - chunk.0 {
-                buf = buf[(chunk.1 - chunk.0)..].to_vec();
+                buf.copy_within((chunk.1 - chunk.0).., 0);
+                buf.resize(buf.len() - (chunk.1 - chunk.0), 0);
             } else {
                 buf.clear();
             }
@@ -310,8 +330,8 @@ where
         Ok(leaves)
     }
 
-    pub fn iterator(&mut self) -> impl Stream<Item = Result<Chunk, Error>> + '_ {
-        try_stream! {
+    pub fn iterator(&mut self) -> Pin<Box<dyn Stream<Item=Result<Chunk, Error>> + '_>> {
+        Box::pin(try_stream! {
             if self.chunks.is_none() {
                 self.hash().await?;
             }
@@ -319,7 +339,7 @@ where
             let mut buf = Vec::with_capacity(MAX_CHUNK_SIZE);
             let mut binary_stream = self.inner.stream();
 
-            for (i, item) in chunks.proofs.iter().enumerate() {
+            for (i, _) in chunks.proofs.iter().enumerate() {
                 let chunk = chunks.chunks.get(i);
                 let proof = chunks.proofs.get(i);
                 if chunk.is_none() || proof.is_none() {
@@ -344,18 +364,19 @@ where
                 chnunk_buf.copy_from_slice(&buf[0..chunk_size]);
                 yield Chunk {
                     data_root: chunks.data_root.clone(),
-                    data_size: chunks.data_size as u64,
+                    data_size: chunks.data_size.to_string(),
                     data_path: Base64(proof.proof.clone()),
-                    offset: proof.offset,
+                    offset: proof.offset.to_string(),
                     chunk: Base64(chnunk_buf)
                 };
                 if buf.len() > chunk_size {
-                    buf = buf[(chunk_size)..].to_vec();
+                    buf.copy_within(chunk_size.., 0);
+                    buf.resize(buf.len() - chunk_size, 0);
                 } else {
                     buf.clear();
                 }
             }
-        }
+        })
     }
 }
 

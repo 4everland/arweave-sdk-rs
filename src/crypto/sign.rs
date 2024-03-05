@@ -2,7 +2,7 @@
 use crate::error::Error;
 use jsonwebkey as jwk;
 use sha2::Digest;
-use std::{fs, path::PathBuf};
+use std::fs;
 use std::str::FromStr;
 use bip39::Language::English;
 
@@ -15,7 +15,7 @@ use boring::{
     bn::BigNum,
 };
 
-use sha3::{Digest as _,  Keccak256};
+use sha3::{Keccak256};
 
 pub trait Signer {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error>;
@@ -24,13 +24,15 @@ pub trait Signer {
     fn wallet_address(&self) -> String;
 
 }
+
 /// Struct for for crypto methods.
+#[derive(Debug, Clone)]
 pub struct ArweaveSigner {
     keypair: Option<PKey<Private>>,
     n: Vec<u8>,
-
 }
 
+#[derive(Debug, Clone)]
 pub struct EthSigner {
     key: Option<libsecp256k1::SecretKey>,
     address: [u8; 20],
@@ -88,7 +90,7 @@ impl Signer for EthSigner {
         format!("{}", ethaddr::Address::from_slice(&self.address))
     }
 }
-
+#[allow(dead_code)]
 impl EthSigner {
     fn from_mnemonic(mnemonic: &str, passphrase: &str) -> Result<EthSigner, Error> {
         let seed = bip39::Mnemonic::parse_in_normalized(English, mnemonic).map_err(|_| Error::MnemonicDecodeError)?;
@@ -225,7 +227,7 @@ impl ArweaveSigner {
         Ok( Self::new(pkey))
     }
 
-    pub fn from_keypair_path(keypair_path: PathBuf) -> Result<Self, Error> {
+    pub fn from_keypair_path(keypair_path: &str) -> Result<Self, Error> {
         let data = fs::read_to_string(keypair_path)?;
         let jwk_parsed: jwk::JsonWebKey = data.parse().map_err(Error::JsonWebKeyError)?;
 
@@ -270,7 +272,7 @@ impl ArweaveSigner {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, str::FromStr};
+    use std::str::FromStr;
 
     use crate::{
         crypto::{base64::Base64, sign::ArweaveSigner, sign::Signer},
@@ -279,18 +281,14 @@ mod tests {
     use crate::crypto::sign::EthSigner;
     use crate::error::Error;
 
-    const DEFAULT_WALLET_PATH: &str = "res/test_wallet.json";
-
-    const TEST_BUNDLER_FILE: &str = "res/test_bundle.json";
-
+    const DEFAULT_WALLET_PATH: &str = "tests/fixtures/arweave_wallet.json";
 
     #[test]
     fn test_default_keypair() {
-        let path = PathBuf::from_str(DEFAULT_WALLET_PATH).unwrap();
-        let provider = ArweaveSigner::from_keypair_path(path).expect("Valid wallet file");
+        let provider = ArweaveSigner::from_keypair_path(DEFAULT_WALLET_PATH).expect("Valid wallet file");
         assert_eq!(
             provider.wallet_address().to_string(),
-            "ggHWyKn0I_CTtsyyt2OR85sPYz9OvKLd9DYIvRQ2ET4"
+            "TJatx76i31o_r63Hr_NeF_ONas7amPdoMTCBxiUWBJY"
         );
     }
 
@@ -304,10 +302,9 @@ mod tests {
             ]
             .to_vec(),
         );
-        let path = PathBuf::from_str("res/test_wallet.json").expect("Could not open .wallet.json");
-        let provider = ArweaveSigner::from_keypair_path(path)?;
+        let provider = ArweaveSigner::from_keypair_path(DEFAULT_WALLET_PATH)?;
         let signature = provider.sign(&message.0).unwrap();
-        let pubk = provider.public_key();
+        let _ = provider.public_key();
 
         //TODO: implement verification
         assert_eq!(provider.verify(&message.0, &signature), true);
@@ -316,7 +313,6 @@ mod tests {
 
     #[test]
     fn test_eth_signer() -> Result<(), error::Error> {
-
         let signer = EthSigner::from_prv_hex("1f534ac18009182c07d266fe4a7903c0bcc8a66190f0967b719b2b3974a69c2f")?;
         println!("{}", signer.wallet_address());
 
@@ -335,7 +331,6 @@ mod tests {
         let signer = EthSigner::from_pubkey(decode_key.as_slice())?;
         assert_eq!(signer.wallet_address(), "0x02A71bA6943D302c0152cdb237CB606ffE1C9BC4");
         Ok(())
-
     }
 
     #[test]

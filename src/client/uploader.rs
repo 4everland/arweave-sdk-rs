@@ -1,69 +1,72 @@
-use std::str::FromStr;
-use std::time::Duration;
-use tokio::time::sleep;
-use crate::consts::{ARWEAVE_BASE_URL, CHUNKS_RETRIES, CHUNKS_RETRY_SLEEP};
-use crate::error::Error;
-use crate::types::Chunk;
+use futures::StreamExt;
 
-use reqwest::{
-    header::{ACCEPT, CONTENT_TYPE},
-    Client,
-};
+use tokio::task;
+use tokio::sync::mpsc;
+
+use crate::error::Error;
+use crate::bundle::bundle::Bundle;
+use crate::bundle::item::BundleStreamFactory;
+use crate::client::client::Client;
+use crate::transaction::transaction::{Transaction, TransactionChunksFactory};
 
 pub struct Uploader {
-    url: url::Url,
+    client: Client,
 }
 
 impl Default for Uploader {
     fn default() -> Self {
-        let url = url::Url::from_str(ARWEAVE_BASE_URL).unwrap();
-        Self { url }
+        Self { client: Client::default() }
     }
 }
 
-impl Uploader {
-    pub fn new(url: url::Url) -> Self {
-        Uploader { url }
+#[allow(dead_code)]
+impl Uploader
+{
+    pub fn new(client: Client) -> Self {
+        Uploader { client }
     }
 
-    pub async fn post_chunk_with_retries(
-        &self,
-        chunk: Chunk,
-        client: Client,
-    ) -> Result<usize, Error> {
-        let mut retries = 0;
-        let mut resp = self.post_chunk(&chunk, &client).await;
+    pub async fn submit<R>(&self, transaction: Transaction, mut chunks_creator: TransactionChunksFactory<Bundle<R>>, concurrent_limit: usize) -> Result<(), Error>
+        where
+            R: BundleStreamFactory
+    {
+        self.client.submit_transaction(transaction).await?;
 
-        while retries < CHUNKS_RETRIES {
-            match resp {
-                Ok(offset) => return Ok(offset),
-                Err(e) => {
-                    dbg!("post_chunk_with_retries: {:?}", e);
-                    sleep(Duration::from_secs(CHUNKS_RETRY_SLEEP)).await;
-                    retries += 1;
-                    resp = self.post_chunk(&chunk, &client).await;
-                }
+        let (tx, mut rx) = mpsc::channel(concurrent_limit);
+        let mut sc = 0;
+        let mut rc = 0;
+        let mut iter = chunks_creator.iterator();
+        while let Some(value) = iter.next().await {
+            let v = value.unwrap();
+            sc += 1;
+            let t = tx.clone();
+            let c  = self.client.clone();
+            task::spawn(async move {
+                t.send(c.upload_chunk(&v).await).await.unwrap()
+            });
+            if sc == concurrent_limit {
+                break;
             }
         }
-        resp
-    }
 
-    pub async fn post_chunk(&self, chunk: &Chunk, client: &Client) -> Result<usize, Error> {
-        let url = self.url.join("chunk").map_err(Error::UrlParseError)?;
-        // let client = reqwest::Client::new();
+        while let Some(r) = rx.recv().await {
+            r?;
+            rc += 1;
+            if let Some(value) = iter.next().await {
+                sc += 1;
+                let v = value.unwrap();
+                let t = tx.clone();
+                let c  = self.client.clone();
+                task::spawn(async move {
+                    t.send(c.upload_chunk(&v).await).await.unwrap()
+                });
+            }
 
-        let resp = client
-            .post(url)
-            .json(&chunk)
-            .header(&ACCEPT, "application/json")
-            .header(&CONTENT_TYPE, "application/json")
-            .send()
-            .await
-            .map_err(|e| Error::PostChunkError(e.to_string()))?;
+            if sc == rc {
+                break
+            }
+        };
 
-        match resp.status() {
-            reqwest::StatusCode::OK => Ok(chunk.offset),
-            _ => Err(Error::StatusCodeNotOk),
-        }
+        Ok(())
     }
 }

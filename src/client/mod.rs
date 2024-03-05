@@ -1,1 +1,2 @@
-mod uploader;
+pub mod uploader;
+pub mod client;

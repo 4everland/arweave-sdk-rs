@@ -1,5 +1,4 @@
-use sha2::{Digest, Sha384};
-use tokio::io::AsyncReadExt;
+use sha2::Digest;
 
 use crate::error::Error;
 
@@ -116,7 +115,6 @@ pub fn deep_hash(deep_hash_item: DeepHashItem) -> [u8; 48] {
 mod tests {
     use std::{fs::File, io::Read};
 
-    use crate::crypto::base64::Base64;
     use crate::{
         crypto::hash::{deep_hash, ToItems},
         error::Error,

@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize, Serializer, Deserializer, ser::Error};
 use apache_avro::{Schema, from_avro_datum, types::Value, types::Value::{Array, Bytes, Record}, from_value, to_value, to_avro_datum};
-use crate::crypto::{base64::Base64, hash::Hasher};
+use crate::crypto::{base64::Base64};
 use crate::types::{BundleTag as Tag};
 
 const SCHEMA_STR: &str = r#"{"type": "array", "items": {"type": "record", "name": "Tag", "fields": [{"name": "name", "type": "string"}, {"name": "value", "type": "string"}]}}"#;
@@ -100,10 +100,10 @@ impl<'de> Deserialize<'de> for Tags {
 mod tests {
     use crate::bundle::tags::Tags;
     use crate::types::{BundleTag as Tag};
-    use apache_avro::{to_value, from_value, types::Value};
+    use apache_avro::{to_value, from_value};
 
     fn setup() -> Tags {
-        let mut tags = Tags {
+        let tags = Tags {
             tags: vec![
                 Tag {
                     name: String::from("tag1"),
@@ -125,9 +125,8 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize_tags() {
-        let mut tags = setup();
+        let tags = setup();
         let v = to_value(&tags).unwrap();
-        let empty = Value::Union(0, Box::new(Value::Null));
         assert_ne!(Tags { tags: vec![] }, tags);
         let deserialized = from_value::<Tags>(&v).unwrap();
         assert_eq!(deserialized, tags);

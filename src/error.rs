@@ -2,6 +2,8 @@ use std::string::FromUtf8Error;
 use url::ParseError;
 
 use thiserror::Error;
+
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Error getting oracle price: {0}")]
@@ -79,8 +81,8 @@ pub enum Error {
     #[error("KeyRejected")]
     KeyParseError(String),
 
-    // #[error("ReqwestError")]
-    // ReqwestError(reqwest::Error),
+    #[error("Reqwest error: {0}")]
+    ReqwestError(reqwest::Error),
 
     #[error("Invalid Key")]
     InvalidKeyError,
@@ -99,6 +101,9 @@ pub enum Error {
 
     #[error("Number {0} is too large for an array of {1} bytes")]
     NumberTooLargeError(usize, u64),
+
+    #[error("Arweave Gateway Error: status code {0}, message {1}")]
+    ArweaveGatewayError(String, String),
 }
 
 impl From<std::io::Error> for Error {

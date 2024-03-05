@@ -53,6 +53,7 @@ pub struct BlockInfo {
     pub tx_tree: Vec<Base64>,
     pub poa: ProofOfAccess,
 }
+
 #[derive(Deserialize, Debug, Default, Eq, PartialEq)]
 pub struct Transaction {
     pub format: u8,
@@ -85,9 +86,9 @@ pub struct TransactionStatus {
 #[derive(Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
 pub struct Chunk {
     pub data_root: Base64,
-    pub data_size: u64,
+    pub data_size: String,
     pub data_path: Base64,
-    pub offset: usize,
+    pub offset: String,
     pub chunk: Base64,
 }
 
